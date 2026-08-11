@@ -749,9 +749,13 @@
   // --- Detector (finding boxes + reading Korean) ------------------------
   //
   // Independent of Engine (which only handles English translation).
-  // PaddleOCR is free/local/no quota but only reliable on real dialogue —
-  // see the Detector dropdown's option text. Gemini remains available for
-  // full SFX coverage or when PaddleOCR's confidence filtering misses text.
+  // PaddleOCR is the default: its boxes come from an actual OCR detector
+  // measuring real glyph pixels, so they reliably cover the full extent of
+  // multi-line text. Gemini's boxes are a vision-model *estimate* instead —
+  // confirmed directly under-bounding multi-line bubbles (leaving the
+  // original Korean visible below the translated label) even though its
+  // translation quality and SFX coverage are both better. Free/local/no
+  // quota either way.
 
   function loadDetector() {
     chrome.storage.local.get(["ctDetector"], (result) => {
@@ -976,7 +980,7 @@
         <span>Detector</span>
         <select id="ct-detector-select">
           <option value="paddleocr">PaddleOCR (free, dialogue only)</option>
-          <option value="gemini">Gemini (best, full SFX coverage)</option>
+          <option value="gemini">Gemini (full SFX coverage, boxes less precise)</option>
         </select>
       </div>
       <div class="ct-fontsize-row">

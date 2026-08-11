@@ -6,19 +6,48 @@ overlaid directly on the page as you read. Two parts:
 - `backend/` — a local FastAPI server that fetches panel images, detects text
   regions using whichever detector you've selected (PaddleOCR by default, or
   Gemini), and translates each line using whichever engine you've selected
-  (Gemini, Azure, DeepL, or NLLB).
+  (Gemini by default, or Azure, DeepL, NLLB).
 - `extension/` — a Chrome extension (Manifest V3) that finds panel images on
   the page and draws translated labels directly over them.
 
-With the default settings (PaddleOCR detector), nothing leaves your machine
-except whatever the selected translation engine needs — Gemini's API only
-gets involved if you switch the Detector or Engine to Gemini. The backend
-only runs on your machine; no data is sent anywhere else.
+With the default detector (PaddleOCR), panel images never leave your machine
+for detection — only the selected translation engine (Gemini by default)
+sees the extracted Korean text. Switching the Detector to Gemini sends full
+panel images to Gemini's API too, and trades detection accuracy for SFX
+coverage (see the Detectors table below). The backend only runs on your
+machine either way; nothing but the selected engine/detector's own API
+calls leaves it.
 
 For the technical breakdown (stack, request flow, caching, batching, why
 things are built the way they are), see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## 1. Backend setup
+## Quick start (Windows)
+
+This is the fastest path if someone just sent you this folder (or a zip of
+it) and you want it working with the least fuss. It requires
+[Python](https://www.python.org/downloads/) to already be installed — the
+setup script will tell you if it isn't.
+
+1. **Double-click `setup.bat`.** It creates a private Python environment,
+   installs everything the backend needs, and — the only manual part — asks
+   you to paste in a free Gemini API key (get one in about 30 seconds at
+   [aistudio.google.com/apikey](https://aistudio.google.com/apikey), no
+   credit card needed). This step only happens once.
+2. **Double-click `start.bat`** any time you want to translate. It opens a
+   small black window — leave it open in the background while you read;
+   closing it turns translation off. (If it says the backend "isn't set up
+   yet," run `setup.bat` first.)
+3. **Load the extension in Chrome** — one-time, see below.
+4. Open any episode on `comic.naver.com`, click **Translate Episode** in the
+   panel that appears top-right, and read.
+
+If anything goes wrong, the sections below cover what each step is actually
+doing and how to do it by hand — useful for troubleshooting, or if you're
+not on Windows (the `.bat` scripts are Windows-only; see [Backend
+setup](#1-backend-setup-manual--non-windows) for the manual/cross-platform
+equivalent).
+
+## 1. Backend setup (manual / non-Windows)
 
 ```bash
 cd backend
@@ -97,8 +126,8 @@ curl http://127.0.0.1:8000/health
 
 | Detector | Quality | Setup | Notes |
 |---|---|---|---|
-| **PaddleOCR** (default) | Excellent on real dialogue (94%+ confidence, exact matches in testing) — but blind to stylized SFX lettering, which it either misses or garbles | Installed automatically with the other backend dependencies (no API key). First use per process loads its models, taking a few seconds. | Fully free, fully local, no daily quota. Low-confidence reads are dropped rather than shown wrong (see `PADDLE_MIN_CONFIDENCE` in `.env`), which in practice filters out most SFX along with genuine misreads. Occasional duplicate/overlapping detections of the same line (seen on busy screentone backgrounds) are deduplicated automatically. |
-| **Gemini** | Best overall — the only detector with real SFX coverage | Already set up | Subject to Gemini's free-tier daily quota. Switch to this when PaddleOCR's confidence filter is dropping text you want to see, or for panels that are mostly SFX. |
+| **PaddleOCR** (default) | Excellent box precision on real dialogue (94%+ confidence, exact matches in testing) — actual OCR-measured glyph positions, not an estimate, so boxes reliably cover the full extent of multi-line text. Blind to stylized SFX lettering, which it either misses or garbles. | Installed automatically with the other backend dependencies (no separate step, no API key) | Fully free, fully local, no daily quota. Low-confidence reads are dropped rather than shown wrong (see `PADDLE_MIN_CONFIDENCE` in `.env`), which in practice filters out most SFX along with genuine misreads. Occasional duplicate/overlapping detections of the same line (seen on busy screentone backgrounds) are deduplicated automatically. |
+| **Gemini** | The only detector with real SFX coverage, and translation reads more naturally when paired with the Gemini engine — but its bounding boxes are a vision-model *estimate*, not a measured extent, and confirmed in testing to under-bound multi-line bubbles (leaving the original Korean visible below/around the translated label) | Needs `GOOGLE_API_KEY` in `backend/.env` (`setup.bat` asks for this) | Subject to Gemini's free-tier daily quota. Worth trying for panels that are mostly SFX, but PaddleOCR's box placement is more trustworthy for regular dialogue. |
 
 Switching detectors on an already-translated episode does trigger fresh
 detection (there's no shortcut — the two methods find different things), but
