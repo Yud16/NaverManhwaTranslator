@@ -71,6 +71,14 @@ body.ct-selecting {
   z-index: 500;
 }
 
+/* A stitched bubble (two per-image fragments folded into one box spanning
+   both) — same body-appended positioning as manual, distinct color so it's
+   clear at a glance which boxes came from an automatic boundary merge. */
+.ct-stitched-bubble {
+  border-color: rgba(120, 200, 140, 0.85) !important;
+  z-index: 500;
+}
+
 .ct-progress-wrap {
   margin-top: 8px;
 }

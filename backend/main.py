@@ -527,6 +527,38 @@ def _has_hangul(text: str) -> bool:
     return bool(_HANGUL_RE.search(text))
 
 
+def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    inter = (ix2 - ix1) * (iy2 - iy1)
+    area_a = (ax2 - ax1) * (ay2 - ay1)
+    area_b = (bx2 - bx1) * (by2 - by1)
+    return inter / max(1.0, area_a + area_b - inter)
+
+
+def _dedupe_lines(
+    lines: list[tuple[float, float, float, float, str, float]],
+) -> list[tuple[float, float, float, float, str]]:
+    """PaddleOCR's detector occasionally emits two overlapping boxes for the
+    same physical text line — seen on panels with a busy screentone/hatching
+    background, which appears to confuse its internal box suppression. Both
+    get recognized as the exact same text and both survive into two
+    overlapping, doubly-rendered translations. When two detections share
+    identical text and substantial overlap, keep only the higher-confidence
+    one."""
+    kept: list[tuple[float, float, float, float, str, float]] = []
+    for line in sorted(lines, key=lambda b: -b[5]):
+        x1, y1, x2, y2, text, _score = line
+        if any(text == k[4] and _iou((x1, y1, x2, y2), (k[0], k[1], k[2], k[3])) > 0.4 for k in kept):
+            continue
+        kept.append(line)
+    return [(x1, y1, x2, y2, text) for x1, y1, x2, y2, text, _score in kept]
+
+
 def paddleocr_detect(settings: Settings, image_bytes: bytes, img_w: int, img_h: int) -> TranslationResult:
     ocr = get_paddle_ocr()
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
@@ -561,10 +593,10 @@ def paddleocr_detect(settings: Settings, image_bytes: bytes, img_w: int, img_h: 
                 # a misread of artwork rather than actual text.
                 continue
             x1, y1, x2, y2 = (float(v) for v in box)
-            lines.append((x1, y1, x2, y2, text))
+            lines.append((x1, y1, x2, y2, text, float(score)))
 
     boxes = []
-    for x1, y1, x2, y2, text in group_text_lines(lines):
+    for x1, y1, x2, y2, text in group_text_lines(_dedupe_lines(lines)):
         boxes.append(
             RawBox(
                 ymin=round(y1 / img_h * 1000),
