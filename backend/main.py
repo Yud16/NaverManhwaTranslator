@@ -2,6 +2,8 @@ import html as html_lib
 import json
 import logging
 import os
+import re
+import tempfile
 import threading
 import time
 from functools import lru_cache
@@ -39,12 +41,15 @@ class Settings(BaseSettings):
     # number. Higher = fewer calls, but a bigger blast radius if one call
     # fails, and more images for the model to keep straight at once.
     gemini_batch_size: int = 5
-    # Optional: only needed if the "papago" translation engine is selected.
-    naver_client_id: str = ""
-    naver_client_secret: str = ""
     # Optional: only needed if the "azure" translation engine is selected.
     azure_translator_key: str = ""
     azure_translator_region: str = ""
+    # Optional: only needed if the "deepl" translation engine is selected.
+    deepl_api_key: str = ""
+    # PaddleOCR detections below this confidence are dropped rather than
+    # shown. Empirically this is what separates real printed dialogue
+    # (94%+ in testing) from stylized SFX lettering it garbles (<70%).
+    paddle_min_confidence: float = 0.85
 
     class Config:
         env_file = ".env"
@@ -128,7 +133,8 @@ class TranslateRequest(BaseModel):
     image_url: str
     glossary: list[GlossaryEntry] = []
     force: bool = False
-    engine: str = "gemini"  # "gemini" | "papago" | "argos"
+    engine: str = "gemini"  # "gemini" | "azure" | "deepl" | "nllb"
+    detector: str = "paddleocr"  # "paddleocr" | "gemini"
 
 
 class RetranslateRequest(BaseModel):
@@ -142,6 +148,26 @@ class TranslateBatchRequest(BaseModel):
     glossary: list[GlossaryEntry] = []
     force: bool = False
     engine: str = "gemini"
+    detector: str = "paddleocr"
+
+
+class RegionCrop(BaseModel):
+    image_url: str
+    x: int
+    y: int
+    w: int
+    h: int
+
+
+class TranslateRegionRequest(BaseModel):
+    # More than one crop covers a manual selection that spans the boundary
+    # between two adjacent panel images (in page order) — they're composited
+    # into one image before detection, same trick as the automated boundary
+    # fix, just user-triggered instead of run for every boundary.
+    crops: list[RegionCrop]
+    glossary: list[GlossaryEntry] = []
+    engine: str = "gemini"
+    detector: str = "paddleocr"
 
 
 REGION_INSTRUCTIONS = """Find every region containing Korean text meant to be read: dialogue in speech
@@ -397,69 +423,197 @@ def health():
     return {"status": "ok", "model": settings.gemini_model}
 
 
+# --- Alternate detectors ----------------------------------------------------
+#
+# Detection (finding text regions + reading the Korean) defaults to
+# PaddleOCR — free, local, no API key. Tested against real panels: it reads
+# printed dialogue very accurately (94%+ confidence, exact matches) but is
+# unreliable on stylized SFX lettering, either missing it or confidently
+# returning garbage. Rather than show wrong SFX translations, low-confidence
+# results are just dropped — Gemini remains available as the detector when
+# full SFX coverage matters more than saving quota.
+
+_paddle_ocr = None
+_paddle_lock = threading.Lock()
+
+
+def get_paddle_ocr():
+    global _paddle_ocr
+    if _paddle_ocr is None:
+        with _paddle_lock:
+            if _paddle_ocr is None:
+                from paddleocr import PaddleOCR
+
+                # enable_mkldnn=False works around a confirmed
+                # NotImplementedError crash in PaddlePaddle 3.3.1's oneDNN
+                # backend during CPU inference on Windows — not optional.
+                #
+                # The rest is a measured ~10x speedup (28s -> ~3s/image on
+                # CPU) with comparable accuracy on real panels:
+                # - use_doc_orientation_classify/use_doc_unwarping/
+                #   use_textline_orientation=False skip three submodules
+                #   meant for photographed/scanned documents (rotation,
+                #   page warp, tilted text lines) that a flat, upright,
+                #   digitally-native webtoon panel never needs — and
+                #   dropping them measurably *improved* one recognition
+                #   in testing rather than hurting it.
+                # - text_detection_model_name switches from PP-OCRv5's
+                #   heavy "server" detector to its "mobile" sibling, which
+                #   is where nearly all of the speedup actually came from.
+                #   The recognition model must be specified explicitly
+                #   alongside it — leaving it implicit silently swapped in
+                #   a non-Korean default and detection came back empty.
+                _paddle_ocr = PaddleOCR(
+                    lang="korean",
+                    enable_mkldnn=False,
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                    use_textline_orientation=False,
+                    text_detection_model_name="PP-OCRv5_mobile_det",
+                    text_recognition_model_name="korean_PP-OCRv5_mobile_rec",
+                )
+    return _paddle_ocr
+
+
+def group_text_lines(
+    lines: list[tuple[float, float, float, float, str]],
+) -> list[tuple[float, float, float, float, str]]:
+    """Merges individual OCR text-line detections into paragraph-level
+    groups when they're vertically stacked with overlapping horizontal
+    extent and a small gap between them — the shape of wrapped dialogue
+    within a single speech bubble.
+
+    PaddleOCR (unlike Gemini) detects one printed line at a time with no
+    concept of "these lines are one sentence" — confirmed directly: a
+    3-line bubble came back as 3 separate boxes, each translated in
+    isolation into disconnected fragments instead of one coherent
+    sentence. This groups lines back into what a reader would recognize as
+    one block of dialogue before translation ever sees them."""
+    if not lines:
+        return []
+
+    ordered = sorted(lines, key=lambda b: (b[1], b[0]))  # top-to-bottom, then left-to-right
+
+    groups: list[list[tuple[float, float, float, float, str]]] = [[ordered[0]]]
+    for box in ordered[1:]:
+        x1, y1, x2, y2, _text = box
+        gx1, gy1, gx2, gy2, _ = groups[-1][-1]
+        line_height = max(1.0, gy2 - gy1)
+        gap = y1 - gy2
+        x_overlap = min(x2, gx2) - max(x1, gx1)
+        narrower_width = min(x2 - x1, gx2 - gx1)
+        horizontally_aligned = narrower_width > 0 and x_overlap > 0.15 * narrower_width
+
+        if horizontally_aligned and gap < 0.7 * line_height:
+            groups[-1].append(box)
+        else:
+            groups.append([box])
+
+    merged = []
+    for group in groups:
+        gx1 = min(b[0] for b in group)
+        gy1 = min(b[1] for b in group)
+        gx2 = max(b[2] for b in group)
+        gy2 = max(b[3] for b in group)
+        text = " ".join(b[4] for b in group)
+        merged.append((gx1, gy1, gx2, gy2, text))
+    return merged
+
+
+_HANGUL_RE = re.compile(r"[가-힣]")  # Hangul syllables block — covers all precomposed Korean text
+
+
+def _has_hangul(text: str) -> bool:
+    return bool(_HANGUL_RE.search(text))
+
+
+def paddleocr_detect(settings: Settings, image_bytes: bytes, img_w: int, img_h: int) -> TranslationResult:
+    ocr = get_paddle_ocr()
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+        f.write(image_bytes)
+        tmp_path = f.name
+
+    try:
+        # Serialize inference calls — the underlying predictor isn't
+        # verified safe for concurrent use from multiple request threads.
+        with _paddle_lock:
+            results = ocr.predict(tmp_path)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    lines = []
+    for res in results:
+        texts = res.get("rec_texts", [])
+        scores = res.get("rec_scores", [])
+        rec_boxes = res.get("rec_boxes", [])
+        for text, score, box in zip(texts, scores, rec_boxes):
+            if score < settings.paddle_min_confidence or not text.strip():
+                continue
+            if not _has_hangul(text):
+                # Stylized SFX lettering sometimes gets confidently misread
+                # as simple Latin digits/letters (e.g. "00", "6", "OK") —
+                # confidently enough to survive the confidence filter above.
+                # Real Korean dialogue always contains at least one Hangul
+                # character, so anything without one is essentially always
+                # a misread of artwork rather than actual text.
+                continue
+            x1, y1, x2, y2 = (float(v) for v in box)
+            lines.append((x1, y1, x2, y2, text))
+
+    boxes = []
+    for x1, y1, x2, y2, text in group_text_lines(lines):
+        boxes.append(
+            RawBox(
+                ymin=round(y1 / img_h * 1000),
+                xmin=round(x1 / img_w * 1000),
+                ymax=round(y2 / img_h * 1000),
+                xmax=round(x2 / img_w * 1000),
+                korean=text,
+                english="",  # PaddleOCR only detects/reads — never translates
+                is_sfx=False,  # not classified; low-confidence SFX is filtered above instead
+            )
+        )
+    return TranslationResult(boxes=boxes)
+
+
 # --- Alternate translation engines -----------------------------------------
 #
-# Detection (finding text regions + reading the Korean) always goes through
-# Gemini — free local detectors tried for this project weren't reliable
-# enough on Korean. What's switchable is which engine turns that Korean text
-# into English: Gemini's own translation (glossary-aware via the prompt), or
-# a cheap/free local (Argos) or Korean-specialized (Papago) MT call applied
-# to the same detected text. Non-Gemini engines don't take instructions, so
-# glossary terms are locked in with a placeholder swap around the call.
-
-_argos_ready = False
-_argos_lock = threading.Lock()
+# What's switchable independently of the detector is which engine turns
+# detected Korean text into English: Gemini's own translation (glossary-aware
+# via the prompt, only available when Gemini is also the detector — otherwise
+# it's just another per-line translator like the rest), a general cloud MT
+# call (Azure, DeepL), or a free/offline local model (NLLB). Non-Gemini
+# engines don't take instructions, so glossary terms are locked in with a
+# placeholder swap around the call (Azure gets a first-party mechanism
+# instead — see build_azure_dictionary_text).
 
 
-def ensure_argos_ready() -> None:
-    global _argos_ready
-    if _argos_ready:
-        return
-    with _argos_lock:
-        if _argos_ready:
-            return
-        import argostranslate.package
-
-        installed = argostranslate.package.get_installed_packages()
-        if not any(p.from_code == "ko" and p.to_code == "en" for p in installed):
-            argostranslate.package.update_package_index()
-            available = argostranslate.package.get_available_packages()
-            pkg = next((p for p in available if p.from_code == "ko" and p.to_code == "en"), None)
-            if pkg is None:
-                raise HTTPException(status_code=502, detail="Argos ko->en package is not available for download")
-            argostranslate.package.install_from_path(pkg.download())
-        _argos_ready = True
-
-
-def argos_translate_text(text: str) -> str:
-    import argostranslate.translate
-
-    ensure_argos_ready()
-    return argostranslate.translate.translate(text, "ko", "en")
-
-
-def papago_translate_text(text: str, settings: Settings) -> str:
-    if not settings.naver_client_id or not settings.naver_client_secret:
+def deepl_translate_text(text: str, settings: Settings) -> str:
+    if not settings.deepl_api_key:
         raise HTTPException(
             status_code=400,
-            detail="Papago engine selected but NAVER_CLIENT_ID/NAVER_CLIENT_SECRET are not set in backend/.env",
+            detail="DeepL engine selected but DEEPL_API_KEY is not set in backend/.env",
         )
+    # Free-tier keys are suffixed ":fx" and only work against the free API
+    # host; paid keys use the standard host. This is the documented way to
+    # tell them apart without a separate settings flag.
+    host = "api-free.deepl.com" if settings.deepl_api_key.endswith(":fx") else "api.deepl.com"
     resp = requests.post(
-        "https://papago.apigw.ntruss.com/nmt/v1/translation",
-        headers={
-            "x-ncp-apigw-api-key-id": settings.naver_client_id,
-            "x-ncp-apigw-api-key": settings.naver_client_secret,
-        },
-        data={"source": "ko", "target": "en", "text": text},
+        f"https://{host}/v2/translate",
+        headers={"Authorization": f"DeepL-Auth-Key {settings.deepl_api_key}"},
+        data={"text": text, "source_lang": "KO", "target_lang": "EN-US"},
         timeout=10,
     )
     if not resp.ok:
-        raise HTTPException(status_code=502, detail=f"Papago request failed: {resp.status_code} {resp.text[:200]}")
+        raise HTTPException(status_code=502, detail=f"DeepL request failed: {resp.status_code} {resp.text[:200]}")
     data = resp.json()
     try:
-        return data["message"]["result"]["translatedText"]
-    except (KeyError, TypeError):
-        raise HTTPException(status_code=502, detail=f"Unexpected Papago response shape: {data}")
+        return data["translations"][0]["text"]
+    except (KeyError, IndexError, TypeError):
+        raise HTTPException(status_code=502, detail=f"Unexpected DeepL response shape: {data}")
 
 
 def build_azure_dictionary_text(text: str, glossary: list[GlossaryEntry]) -> str:
@@ -517,6 +671,55 @@ def azure_translate_text(text: str, glossary: list[GlossaryEntry], settings: Set
         raise HTTPException(status_code=502, detail=f"Unexpected Azure response shape: {data}")
 
 
+# NLLB-200 (distilled 600M): an actual pretrained multilingual MT model, not
+# a from-scratch training exercise — no API key, no per-call cost, no quota.
+# Downloaded once from Hugging Face on first use (~2.4GB) and cached under
+# ~/.cache/huggingface after that; translation itself needs no network once
+# cached. Quality trades off against Gemini's (small local model vs. a
+# frontier LLM) but is a real, actively-maintained model rather than the
+# unweighted student project this replaces as an idea.
+_nllb_model = None
+_nllb_tokenizer = None
+_nllb_lock = threading.Lock()
+
+
+def get_nllb_model():
+    # Loads the tokenizer/model directly instead of via pipeline("translation", ...):
+    # the installed transformers version's pipeline task registry no longer
+    # recognizes the "translation" task string at all, so the high-level
+    # shortcut raises KeyError. AutoTokenizer/AutoModelForSeq2SeqLM + .generate()
+    # is the stable, version-independent way to run NLLB.
+    global _nllb_model, _nllb_tokenizer
+    if _nllb_model is None:
+        with _nllb_lock:
+            if _nllb_model is None:
+                try:
+                    from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+                except ImportError:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "NLLB engine selected but its dependencies aren't installed. "
+                            "Run: pip install torch transformers sentencepiece"
+                        ),
+                    )
+                model_name = "facebook/nllb-200-distilled-600M"
+                _nllb_tokenizer = AutoTokenizer.from_pretrained(model_name, src_lang="kor_Hang")
+                _nllb_model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+    return _nllb_model, _nllb_tokenizer
+
+
+def nllb_translate_text(text: str) -> str:
+    model, tokenizer = get_nllb_model()
+    inputs = tokenizer(text, return_tensors="pt")
+    generated = model.generate(
+        **inputs,
+        forced_bos_token_id=tokenizer.convert_tokens_to_ids("eng_Latn"),
+        max_new_tokens=512,
+    )
+    return tokenizer.batch_decode(generated, skip_special_tokens=True)[0]
+
+
 def translate_with_glossary(text: str, glossary: list[GlossaryEntry], engine_fn) -> str:
     """Best-effort term-locking for engines that don't take instructions:
     swap each glossary term for a placeholder token before translating, then
@@ -543,7 +746,11 @@ def translate_with_glossary(text: str, glossary: list[GlossaryEntry], engine_fn)
 # translation engine, so it's cached separately and reused across engine/
 # glossary switches — only the "gemini" engine path needs a fresh call when
 # the glossary changes, since its translation is glossary-aware at call time.
+# Kept as two separate dicts (rather than one keyed by detector) so the
+# existing Gemini-detector cache/behavior stays untouched by adding a second
+# detector option.
 _ocr_cache: dict[str, TranslationResult] = {}
+_paddle_cache: dict[str, TranslationResult] = {}
 
 _cache_save_lock = threading.Lock()
 
@@ -562,7 +769,17 @@ def load_cache() -> None:
             _ocr_cache[url] = TranslationResult.model_validate(raw)
         except Exception:
             continue  # skip anything that doesn't match the current schema
-    logger.info("Loaded cache: %d translation(s), %d detection(s)", len(_cache), len(_ocr_cache))
+    for url, raw in data.get("paddle_cache", {}).items():
+        try:
+            _paddle_cache[url] = TranslationResult.model_validate(raw)
+        except Exception:
+            continue
+    logger.info(
+        "Loaded cache: %d translation(s), %d Gemini detection(s), %d PaddleOCR detection(s)",
+        len(_cache),
+        len(_ocr_cache),
+        len(_paddle_cache),
+    )
 
 
 def save_cache() -> None:
@@ -572,6 +789,7 @@ def save_cache() -> None:
         data = {
             "translate_cache": _cache,
             "ocr_cache": {url: result.model_dump() for url, result in _ocr_cache.items()},
+            "paddle_cache": {url: result.model_dump() for url, result in _paddle_cache.items()},
         }
         tmp_path = CACHE_FILE.with_suffix(".tmp")
         try:
@@ -616,6 +834,31 @@ def get_ocr_boxes_batch(
     return results
 
 
+def get_paddle_boxes(
+    settings: Settings, image_url: str, image_bytes: bytes, img: Image.Image, force: bool
+) -> TranslationResult:
+    if not force and image_url in _paddle_cache:
+        return _paddle_cache[image_url]
+    result = paddleocr_detect(settings, image_bytes, img.width, img.height)
+    _paddle_cache[image_url] = result
+    return result
+
+
+def get_paddle_boxes_batch(
+    settings: Settings,
+    image_urls: list[str],
+    images_bytes: list[bytes],
+    imgs: list[Image.Image],
+    force: bool,
+) -> list[TranslationResult]:
+    # No Gemini-style batching needed — PaddleOCR runs locally with no
+    # per-request quota to conserve, so each image is just processed in turn.
+    return [
+        get_paddle_boxes(settings, url, image_bytes, img, force)
+        for url, image_bytes, img in zip(image_urls, images_bytes, imgs)
+    ]
+
+
 def clean_text(text: str) -> str:
     """Gemini sometimes emits literal "\\n" escape sequences (or real
     newlines) inside translated text. Bubbles wrap on their own via CSS, so
@@ -646,25 +889,34 @@ def clamp_box(box: TextBox, img_w: int, img_h: int) -> TextBox | None:
 
 
 def build_payload(
-    img: Image.Image, result: TranslationResult, engine: str, glossary: list[GlossaryEntry], settings: Settings
+    img: Image.Image,
+    result: TranslationResult,
+    engine: str,
+    glossary: list[GlossaryEntry],
+    settings: Settings,
+    detector: str,
 ) -> dict:
-    """Turns one image's raw Gemini detection into the final API response
-    shape: clamps/cleans each box and, for non-Gemini engines, translates
-    it via the selected engine (Gemini's own translation is already baked
-    into `result` from detection time)."""
+    """Turns one image's raw detection into the final API response shape:
+    clamps/cleans each box and translates it via the selected engine. When
+    detector == engine == "gemini", the translation was already produced
+    together with detection (glossary-aware, via the prompt) and `box.english`
+    is trusted as-is; every other combination — including engine=="gemini"
+    paired with a non-Gemini detector — translates each box explicitly,
+    since PaddleOCR only detects/reads and never translates."""
     boxes = []
     for raw_box in result.boxes:
         box = clamp_box(denormalize_box(raw_box, img.width, img.height), img.width, img.height)
         if box is None:
             continue
 
-        english = box.english
-        if engine == "argos":
-            english = translate_with_glossary(box.korean, glossary, argos_translate_text)
+        if engine == "gemini":
+            english = box.english if detector == "gemini" else call_gemini_text(settings, box.korean, glossary)
         elif engine == "azure":
             english = azure_translate_text(box.korean, glossary, settings)
-        elif engine == "papago":
-            english = translate_with_glossary(box.korean, glossary, lambda t: papago_translate_text(t, settings))
+        elif engine == "deepl":
+            english = translate_with_glossary(box.korean, glossary, lambda t: deepl_translate_text(t, settings))
+        else:  # nllb
+            english = translate_with_glossary(box.korean, glossary, nllb_translate_text)
 
         boxes.append(
             {
@@ -682,24 +934,36 @@ def build_payload(
     return {"width": img.width, "height": img.height, "boxes": boxes}
 
 
+def _validate_engine_detector(engine: str, detector: str) -> None:
+    if engine not in ("gemini", "azure", "deepl", "nllb"):
+        raise HTTPException(status_code=400, detail=f"Unknown engine: {engine}")
+    if detector not in ("gemini", "paddleocr"):
+        raise HTTPException(status_code=400, detail=f"Unknown detector: {detector}")
+
+
+def _detect(settings: Settings, detector: str, engine: str, image_url: str, image_bytes: bytes, img: Image.Image, glossary: list[GlossaryEntry], force: bool) -> TranslationResult:
+    if detector == "paddleocr":
+        return get_paddle_boxes(settings, image_url, image_bytes, img, force)
+    # detector == "gemini"
+    if engine == "gemini":
+        return call_gemini(settings, image_bytes, glossary)
+    return get_ocr_boxes(settings, image_url, image_bytes, force)
+
+
 @app.post("/translate")
 def translate(req: TranslateRequest):
-    if req.engine not in ("gemini", "argos", "papago", "azure"):
-        raise HTTPException(status_code=400, detail=f"Unknown engine: {req.engine}")
+    _validate_engine_detector(req.engine, req.detector)
 
-    cache_key = f"{req.image_url}::{req.engine}::{glossary_cache_key(req.glossary)}"
+    cache_key = f"{req.image_url}::{req.detector}::{req.engine}::{glossary_cache_key(req.glossary)}"
     if not req.force and cache_key in _cache:
         return _cache[cache_key]
 
     settings = get_settings()
     image_bytes, img = fetch_image(req.image_url)
 
-    if req.engine == "gemini":
-        result = call_gemini(settings, image_bytes, req.glossary)
-    else:
-        result = get_ocr_boxes(settings, req.image_url, image_bytes, req.force)
+    result = _detect(settings, req.detector, req.engine, req.image_url, image_bytes, img, req.glossary, req.force)
 
-    payload = build_payload(img, result, req.engine, req.glossary, settings)
+    payload = build_payload(img, result, req.engine, req.glossary, settings, req.detector)
     _cache[cache_key] = payload
     save_cache()
     return payload
@@ -707,16 +971,17 @@ def translate(req: TranslateRequest):
 
 @app.post("/translate_batch")
 def translate_batch(req: TranslateBatchRequest):
-    if req.engine not in ("gemini", "argos", "papago", "azure"):
-        raise HTTPException(status_code=400, detail=f"Unknown engine: {req.engine}")
+    _validate_engine_detector(req.engine, req.detector)
     if len(req.image_urls) > 25:
         raise HTTPException(status_code=400, detail="Batch too large (max 25 images)")
 
     settings = get_settings()
 
-    # Anything already fully cached for this exact engine+glossary needs no
-    # Gemini involvement at all — only genuinely new work goes into detection.
-    cache_keys = [f"{url}::{req.engine}::{glossary_cache_key(req.glossary)}" for url in req.image_urls]
+    # Anything already fully cached for this exact detector+engine+glossary
+    # needs no work at all — only genuinely new content goes into detection.
+    cache_keys = [
+        f"{url}::{req.detector}::{req.engine}::{glossary_cache_key(req.glossary)}" for url in req.image_urls
+    ]
     payloads: list[dict | None] = [None] * len(req.image_urls)
     pending_indices = []
     for i, key in enumerate(cache_keys):
@@ -731,13 +996,15 @@ def translate_batch(req: TranslateBatchRequest):
         images_bytes = [b for b, _ in fetched]
         imgs = [im for _, im in fetched]
 
-        if req.engine == "gemini":
+        if req.detector == "paddleocr":
+            results = get_paddle_boxes_batch(settings, pending_urls, images_bytes, imgs, req.force)
+        elif req.engine == "gemini":
             results = call_gemini_batch_chunked(settings, images_bytes, req.glossary)
         else:
             results = get_ocr_boxes_batch(settings, pending_urls, images_bytes, req.force)
 
         for idx, img, result in zip(pending_indices, imgs, results):
-            payload = build_payload(img, result, req.engine, req.glossary, settings)
+            payload = build_payload(img, result, req.engine, req.glossary, settings, req.detector)
             payloads[idx] = payload
             _cache[cache_keys[idx]] = payload
 
@@ -746,25 +1013,79 @@ def translate_batch(req: TranslateBatchRequest):
     return {"results": payloads}
 
 
+def translate_text_via_engine(korean: str, glossary: list[GlossaryEntry], engine: str, settings: Settings) -> str:
+    if engine == "gemini":
+        return call_gemini_text(settings, korean, glossary)
+    elif engine == "azure":
+        return azure_translate_text(korean, glossary, settings)
+    elif engine == "deepl":
+        return translate_with_glossary(korean, glossary, lambda t: deepl_translate_text(t, settings))
+    else:  # nllb
+        return translate_with_glossary(korean, glossary, nllb_translate_text)
+
+
 @app.post("/retranslate")
 def retranslate(req: RetranslateRequest):
-    if req.engine not in ("gemini", "argos", "papago", "azure"):
+    if req.engine not in ("gemini", "azure", "deepl", "nllb"):
         raise HTTPException(status_code=400, detail=f"Unknown engine: {req.engine}")
 
     settings = get_settings()
-
-    if req.engine == "gemini":
-        english = call_gemini_text(settings, req.korean, req.glossary)
-    elif req.engine == "argos":
-        english = translate_with_glossary(req.korean, req.glossary, argos_translate_text)
-    elif req.engine == "azure":
-        english = azure_translate_text(req.korean, req.glossary, settings)
-    else:  # papago
-        english = translate_with_glossary(
-            req.korean, req.glossary, lambda t: papago_translate_text(t, settings)
-        )
-
+    english = translate_text_via_engine(req.korean, req.glossary, req.engine, settings)
     return {"english": clean_text(english)}
+
+
+@app.post("/translate_region")
+def translate_region(req: TranslateRegionRequest):
+    _validate_engine_detector(req.engine, req.detector)
+    if not req.crops:
+        raise HTTPException(status_code=400, detail="No crop regions given")
+    if len(req.crops) > 5:
+        raise HTTPException(status_code=400, detail="Too many crop regions (max 5)")
+
+    settings = get_settings()
+
+    cropped = []
+    for c in req.crops:
+        _, img = fetch_image(c.image_url)
+        x = max(0, min(c.x, img.width - 1))
+        y = max(0, min(c.y, img.height - 1))
+        w = max(1, min(c.w, img.width - x))
+        h = max(1, min(c.h, img.height - y))
+        cropped.append(img.crop((x, y, x + w, y + h)))
+
+    if len(cropped) == 1:
+        composite = cropped[0]
+    else:
+        # Selection spans an image boundary — stack the crops in the order
+        # given (page order) into one image so a line split across the
+        # boundary is read whole instead of as two cropped fragments.
+        width = max(c.width for c in cropped)
+        total_height = sum(c.height for c in cropped)
+        composite = Image.new("RGB", (width, total_height), "white")
+        y_off = 0
+        for c in cropped:
+            composite.paste(c, (0, y_off))
+            y_off += c.height
+
+    buf = io.BytesIO()
+    composite.save(buf, format="JPEG", quality=92)
+    composite_bytes = buf.getvalue()
+
+    if req.detector == "gemini":
+        result = call_gemini(settings, composite_bytes, [])
+    else:
+        result = paddleocr_detect(settings, composite_bytes, composite.width, composite.height)
+
+    # Treat the whole manual selection as one translation unit rather than
+    # rendering possibly-multiple sub-boxes — the user already delimited
+    # exactly the area they care about, and the result renders as a single
+    # floating overlay at that same selection rect regardless.
+    korean = " ".join(clean_text(b.korean) for b in result.boxes if clean_text(b.korean))
+    if not korean:
+        return {"korean": "", "english": ""}
+
+    english = translate_text_via_engine(korean, req.glossary, req.engine, settings)
+    return {"korean": korean, "english": clean_text(english)}
 
 
 if __name__ == "__main__":

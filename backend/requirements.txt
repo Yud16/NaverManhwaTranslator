@@ -5,4 +5,12 @@ pillow==10.4.0
 requests==2.32.3
 python-dotenv==1.0.1
 pydantic-settings==2.5.2
-argostranslate==1.11.0
+paddlepaddle==3.3.1
+paddleocr==3.7.0
+# NOT installed by default — only needed for the "nllb" translation engine
+# (free/offline, no API key). Unlike Azure/DeepL, this pulls in torch, which
+# is a multi-hundred-MB-to-multi-GB download most users won't need, so it's
+# opt-in rather than forced on everyone via this file. To use it:
+#   pip install torch transformers sentencepiece
+# First use then downloads facebook/nllb-200-distilled-600M (~2.4GB) from
+# Hugging Face and caches it under ~/.cache/huggingface.

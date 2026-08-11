@@ -10,6 +10,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         glossary: message.glossary || [],
         force: message.force || false,
         engine: message.engine || "gemini",
+        detector: message.detector || "paddleocr",
       }),
     })
       .then(async (res) => {
@@ -34,6 +35,31 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         glossary: message.glossary || [],
         force: message.force || false,
         engine: message.engine || "gemini",
+        detector: message.detector || "paddleocr",
+      }),
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const detail = await res.text().catch(() => "");
+          sendResponse({ ok: false, status: res.status, error: detail });
+          return;
+        }
+        const data = await res.json();
+        sendResponse({ ok: true, data });
+      })
+      .catch((err) => sendResponse({ ok: false, status: 0, error: String(err) }));
+    return true;
+  }
+
+  if (message.type === "translateRegion") {
+    fetch(`${BACKEND_URL}/translate_region`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        crops: message.crops,
+        glossary: message.glossary || [],
+        engine: message.engine || "gemini",
+        detector: message.detector || "paddleocr",
       }),
     })
       .then(async (res) => {
