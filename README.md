@@ -33,14 +33,6 @@ GOOGLE_API_KEY=your_actual_key
 GEMINI_MODEL=gemini-flash-lite-latest
 ```
 
-`GEMINI_MODEL` matters — Google's model names get deprecated/replaced over
-time. `gemini-flash-lite-latest` is an alias Google keeps pointed at a
-current model, so it shouldn't go stale the way a pinned model name will.
-If translate calls start 404ing, that's the first thing to check.
-
-Run it (from an activated venv, `python` already resolves to the venv's
-interpreter — no need for the full `.venv/Scripts/python.exe` path):
-
 ```bash
 python main.py
 ```
