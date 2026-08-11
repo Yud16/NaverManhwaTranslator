@@ -1121,7 +1121,22 @@ def translate_region(req: TranslateRegionRequest):
 
 
 if __name__ == "__main__":
-    import uvicorn
+    import sys
 
-    settings = get_settings()
+    import uvicorn
+    from pydantic import ValidationError
+
+    try:
+        settings = get_settings()
+    except ValidationError:
+        # A friend running this for the first time sees this instead of a
+        # raw pydantic traceback if .env is missing or GOOGLE_API_KEY isn't
+        # set — setup.bat/setup_env.py should have already handled this, but
+        # main.py can also be run directly.
+        print()
+        print("backend/.env is missing or doesn't have GOOGLE_API_KEY set.")
+        print("Run setup.bat first, or copy .env.example to .env and add a")
+        print("Gemini API key (free at https://aistudio.google.com/apikey).")
+        print()
+        sys.exit(1)
     uvicorn.run("main:app", host=settings.host, port=settings.port)

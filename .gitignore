@@ -1,0 +1,14 @@
+# Secrets — never commit a real .env (API keys). .env.example is the template.
+backend/.env
+
+# Python virtual environment (created by setup.bat / py -m venv)
+backend/.venv/
+__pycache__/
+*.pyc
+
+# Local translation/detection cache — machine-specific, regenerates on its own
+backend/cache.json
+
+# OS noise
+.DS_Store
+Thumbs.db
