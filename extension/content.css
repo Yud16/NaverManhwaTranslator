@@ -1,0 +1,442 @@
+.ct-panel {
+  position: fixed;
+  top: 90px;
+  right: 20px;
+  z-index: 999999;
+  background: #1e1e1e;
+  color: #fff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  border-radius: 10px;
+  padding: 12px 14px;
+  width: 300px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  font-size: 13px;
+}
+
+.ct-panel h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+}
+
+.ct-panel button {
+  width: 100%;
+  padding: 8px;
+  margin-top: 6px;
+  border: none;
+  border-radius: 6px;
+  background: #4a90e2;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.ct-panel button:disabled {
+  background: #555;
+  cursor: default;
+}
+
+.ct-progress-wrap {
+  margin-top: 8px;
+}
+
+.ct-progress-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: #333;
+  overflow: hidden;
+}
+
+.ct-progress-fill {
+  height: 100%;
+  background: #4a90e2;
+  width: 0%;
+  transition: width 0.25s ease;
+}
+
+.ct-progress-text {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #aaa;
+  text-align: center;
+}
+
+.ct-fontsize-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #ccc;
+}
+
+.ct-fontsize-row span:first-child {
+  flex: 1;
+}
+
+.ct-fontsize-row #ct-font-val {
+  flex: none;
+  min-width: 30px;
+  text-align: center;
+  color: #fff;
+}
+
+.ct-fontsize-row button {
+  width: 24px !important;
+  height: 24px;
+  margin-top: 0 !important;
+  padding: 0 !important;
+  line-height: 24px;
+  font-size: 14px !important;
+}
+
+.ct-fontsize-row input[type="range"] {
+  flex: 1;
+  accent-color: #4a90e2;
+}
+
+.ct-fontsize-row #ct-opacity-val {
+  flex: none;
+  min-width: 34px;
+  text-align: center;
+  color: #fff;
+}
+
+.ct-fontsize-row select {
+  flex: none;
+  padding: 3px 4px;
+  border-radius: 4px;
+  border: 1px solid #444;
+  background: #2a2a2a;
+  color: #fff;
+  font-size: 11px;
+  max-width: 60%;
+}
+
+.ct-fontsize-row input[type="color"] {
+  flex: none;
+  width: 32px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+}
+
+.ct-fontsize-row input[type="checkbox"] {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  accent-color: #4a90e2;
+  cursor: pointer;
+}
+
+/* SFX boxes/rows stay in the DOM (still detected + translated either way)
+   but are hidden client-side when the "Show sound effects" toggle is off —
+   toggling it is instant, no re-translate needed. */
+.ct-hide-sfx .ct-bubble.ct-sfx,
+.ct-hide-sfx .ct-trow.ct-sfx {
+  display: none;
+}
+
+.ct-tabs {
+  display: flex;
+  gap: 4px;
+  margin-top: 10px;
+  border-bottom: 1px solid #3a3a3a;
+}
+
+.ct-tab {
+  width: auto !important;
+  flex: 1;
+  margin-top: 0 !important;
+  padding: 6px 4px !important;
+  background: transparent !important;
+  color: #999 !important;
+  font-weight: 500 !important;
+  border-radius: 0 !important;
+  border-bottom: 2px solid transparent !important;
+  font-size: 12px !important;
+}
+
+.ct-tab.active {
+  color: #fff !important;
+  border-bottom-color: #4a90e2 !important;
+}
+
+.ct-tab-content {
+  margin-top: 8px;
+}
+
+.ct-status {
+  font-size: 12px;
+  color: #ccc;
+  max-height: 160px;
+  overflow-y: auto;
+  line-height: 1.5;
+}
+
+.ct-translations-list {
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ct-trow {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #2a2a2a;
+  cursor: default;
+}
+
+.ct-trow.ct-active {
+  background: #3d5a80;
+}
+
+.ct-trow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.ct-trow-panel {
+  font-size: 10px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.ct-trow-refresh {
+  width: auto !important;
+  margin-top: 0 !important;
+  padding: 0 6px !important;
+  height: 18px;
+  line-height: 18px !important;
+  font-size: 12px !important;
+  background: #3a3a3a !important;
+  color: #ccc !important;
+  border-radius: 4px !important;
+}
+
+.ct-trow-refresh:hover {
+  background: #4a90e2 !important;
+  color: #fff !important;
+}
+
+.ct-trow-korean {
+  font-size: 12px;
+  color: #999;
+  margin-top: 2px;
+}
+
+.ct-trow-english {
+  font-size: 13px;
+  color: #fff;
+  margin-top: 2px;
+}
+
+.ct-glossary-form {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.ct-glossary-form input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid #444;
+  background: #2a2a2a;
+  color: #fff;
+  font-size: 12px;
+}
+
+.ct-glossary-form button {
+  width: auto !important;
+  margin-top: 0 !important;
+  padding: 6px 10px !important;
+}
+
+.ct-glossary-list {
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ct-glossary-empty {
+  font-size: 12px;
+  color: #888;
+  line-height: 1.5;
+}
+
+.ct-glossary-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: #2a2a2a;
+  font-size: 12px;
+}
+
+.ct-glossary-kr {
+  color: #ccc;
+}
+
+.ct-glossary-arrow {
+  color: #666;
+}
+
+.ct-glossary-en {
+  color: #fff;
+  flex: 1;
+}
+
+.ct-glossary-del {
+  width: auto !important;
+  margin-top: 0 !important;
+  padding: 2px 8px !important;
+  background: #5a2a2a !important;
+  font-size: 14px !important;
+  line-height: 1 !important;
+}
+
+.ct-trow {
+  cursor: pointer;
+}
+
+.ct-copy-menu {
+  position: fixed;
+  z-index: 1000000;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  display: none;
+}
+
+.ct-copy-menu.open {
+  display: block;
+}
+
+.ct-copy-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 12px;
+  background: transparent;
+  color: #eee;
+  border: none;
+  border-radius: 5px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ct-copy-menu button:hover {
+  background: #3d5a80;
+}
+
+.ct-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+
+.ct-dot.ok {
+  background: #4caf50;
+}
+
+.ct-dot.bad {
+  background: #e05555;
+}
+
+.ct-img-wrap {
+  /* Naver's own CSS centers each panel image (~690px) inside a much wider
+     (min-width:960px) viewer via margin:0 auto on the <img>. A plain
+     display:block wrapper stretches to fill that full width instead of the
+     image's own width, so percentage-based overlay coordinates ended up
+     measured against the wrong (much wider) box. Shrink-to-fit the wrapper
+     to the image itself and re-apply the centering here instead. */
+  position: relative;
+  display: block;
+  width: fit-content;
+  margin: 0 auto;
+  line-height: 0;
+}
+
+.ct-overlay-container {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.ct-bubble {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  pointer-events: auto;
+  cursor: pointer;
+
+  /* At rest: just a faint outline so the art underneath stays fully visible. */
+  background: transparent;
+  border: 1.5px dashed rgba(120, 170, 255, 0.55);
+}
+
+/* The label is sized to its own text (not stretched to the hit area).
+   Visible by default; the "Always show translation" checkbox switches this
+   to hover/active-only via .ct-labels-hover-only below. */
+.ct-bubble-label {
+  max-width: 92%;
+  max-height: 92%;
+  /* Flex items default to min-width/min-height:auto, which can size them
+     to their content and push past max-height before overflow ever clips
+     anything. Zero these out so max-height is the real ceiling. */
+  min-width: 0;
+  min-height: 0;
+  padding: 3px 7px;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: var(--ct-label-font-size, 24px);
+  line-height: 1.25;
+  text-align: center;
+  box-sizing: border-box;
+  overflow-wrap: break-word;
+  overflow: hidden;
+  pointer-events: none;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: rgba(255, 255, 255, var(--ct-label-bg-opacity, 1));
+  color: var(--ct-label-color, #111111);
+  opacity: 1;
+  transition: opacity 0.12s ease;
+}
+
+/* Hover-only mode: labels stay invisible until hovered/active, so the art
+   underneath stays fully visible at rest. Off by default. */
+.ct-labels-hover-only .ct-bubble-label {
+  opacity: 0;
+}
+
+.ct-labels-hover-only .ct-bubble:hover .ct-bubble-label,
+.ct-labels-hover-only .ct-bubble.ct-active .ct-bubble-label {
+  opacity: 1;
+}

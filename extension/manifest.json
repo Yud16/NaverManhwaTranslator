@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Naver Webtoon Translator",
+  "version": "1.0.0",
+  "description": "Translates Korean speech bubbles on comic.naver.com episodes using your own Gemini API key via a local backend.",
+  "permissions": ["storage", "clipboardWrite"],
+  "host_permissions": [
+    "https://comic.naver.com/*",
+    "http://127.0.0.1:8000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://comic.naver.com/webtoon/detail*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
