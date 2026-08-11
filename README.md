@@ -4,14 +4,16 @@ Translates Korean speech bubbles/SFX on `comic.naver.com` episode pages,
 overlaid directly on the page as you read. Two parts:
 
 - `backend/` — a local FastAPI server that fetches a panel image, detects
-  text regions via Gemini (your own API key), and translates each line
-  using whichever engine you've selected (Gemini, Papago, or Argos).
+  text regions using whichever detector you've selected (PaddleOCR by
+  default, or Gemini), and translates each line using whichever engine
+  you've selected (Gemini, Azure, Papago, or Argos).
 - `extension/` — a Chrome extension (Manifest V3) that finds panel images on
   the page and draws hover-reveal translated labels over them.
 
-Nothing is uploaded anywhere except the image bytes sent to Google's Gemini
-API for detection, and (if selected) the extracted Korean text sent to
-Naver's Papago API for translation. The backend only runs on your machine.
+With the default settings (PaddleOCR detector), nothing leaves your machine
+except whatever the selected translation engine needs — Gemini's API only
+gets involved if you switch the Detector or Engine to Gemini. The backend
+only runs on your machine; no data is sent anywhere else.
 
 For the technical breakdown (stack, request flow, caching, batching, why
 things are built the way they are), see [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -73,7 +75,9 @@ curl http://127.0.0.1:8000/health
 
 - **Text size / Bg opacity / Text color** — appearance of the revealed
   label, live-adjustable, persisted across sessions.
-- **Engine** — which translator to use (see below).
+- **Detector** — which method finds text regions + reads the Korean (see
+  below).
+- **Engine** — which translator turns that Korean into English (see below).
 - **Log / Translations / Glossary tabs**:
   - **Translations** lists every line found so far. Click a row to jump to
     its bubble on the page; right-click for **Copy Korean** / **Copy
@@ -84,20 +88,34 @@ curl http://127.0.0.1:8000/health
     restarting anything — click ↻ on an already-translated panel afterward
     to re-apply.
 
+### Detectors
+
+| Detector | Quality | Setup | Notes |
+|---|---|---|---|
+| **PaddleOCR** (default) | Excellent on real dialogue (94%+ confidence, exact matches in testing) — but blind to stylized SFX lettering, which it either misses or garbles | Installed automatically with the other backend dependencies (no API key). First use per process loads its models, taking a few seconds. | Fully free, fully local, no daily quota. Low-confidence reads are dropped rather than shown wrong (see `PADDLE_MIN_CONFIDENCE` in `.env`), which in practice filters out most SFX along with genuine misreads. |
+| **Gemini** | Best overall — the only detector with real SFX coverage | Already set up | Subject to Gemini's free-tier daily quota. Switch to this when PaddleOCR's confidence filter is dropping text you want to see, or for panels that are mostly SFX. |
+
+Switching detectors on an already-translated episode does trigger fresh
+detection (there's no shortcut — the two methods find different things), but
+switching *engines* afterward doesn't need to re-detect anything, regardless
+of which detector found the text.
+
 ### Translation engines
 
 | Engine | Quality | Setup | Notes |
 |---|---|---|---|
-| **Gemini** (default) | Best in testing | Already set up | Glossary terms are enforced via prompt instructions — most reliable. Detection (finding text + reading Korean) always uses Gemini regardless of this setting. |
+| **Gemini** (default) | Best in testing | Already set up | When paired with the Gemini detector, translation is glossary-aware via prompt instructions in the same call as detection — most reliable. Paired with any other detector, it's just another per-line translator (via a lightweight text-only call), same as the engines below. |
 | **Azure** | Real MT quality, untested for this specific project's Korean dialogue but should clear Argos easily | Needs `AZURE_TRANSLATOR_KEY` (`AZURE_TRANSLATOR_REGION` too, unless the resource is "Global") in `backend/.env` — create a free Translator resource at [portal.azure.com](https://portal.azure.com) (F0 tier, 2M free characters/month, card-based signup — no Korean-phone verification wall) | Glossary terms use Azure's own first-party "dynamic dictionary" feature (officially documented as reliable for proper nouns), not a placeholder hack. |
 | **Papago** | Korean-specialized, likely close to Gemini | Needs `NAVER_CLIENT_ID` / `NAVER_CLIENT_SECRET` in `backend/.env` — register a free app at [Naver Cloud Platform](https://console.ncloud.com) under AI/ML → Papago Translation (150,000 free characters/month) | Naver's signup phone-verifies against Korean carriers and can be a real dead end for non-Korean numbers. Glossary terms are locked in via a placeholder-swap trick. |
 | **Argos** | Noticeably worse — tested it directly and it flat-out mistranslated a line ("기다렸다" → "Thank you") | None — installs its Korean↔English model automatically on first use, fully offline after that | Free with zero setup and no rate limit, useful as a fallback once you've burned through Gemini's daily quota, not recommended as a default. |
 
 Switching engines (or editing the glossary) after a panel's already been
-translated doesn't re-run Gemini's detection step — only Gemini's own
-translation path needs a fresh Gemini call, since it bakes glossary
-awareness into the prompt. Azure/Papago/Argos re-translate the already-detected
-Korean text directly, so flipping between them is instant and free.
+translated doesn't re-run detection — only the Gemini-detector + Gemini-engine
+combination needs a fresh Gemini call on an engine/glossary change, since
+that's the one case where translation is baked into the detection call
+itself. Every other engine re-translates the already-detected Korean text
+directly, so flipping between them (or switching detectors, once that
+detector's own detection is cached) is instant and free.
 
 ## How it works
 
@@ -113,12 +131,13 @@ This tool instead:
    CORS/CSP restrictions that would block a direct fetch from the content
    script.
 3. The backend downloads the image server-side (no browser CORS issue at
-   all there) and sends it to Gemini, asking for every text region's
-   bounding box (in Gemini's own normalized 0–1000 spatial-grounding
-   format — noticeably more accurate than asking it to freehand pixel
-   coordinates) plus the original Korean text.
-4. Depending on the selected engine, that Korean text is translated by
-   Gemini itself, by Papago's API, or by a local Argos Translate model.
+   all there) and runs the selected **detector** on it: PaddleOCR (local,
+   confidence-filtered) or Gemini (bounding boxes in its own normalized
+   0–1000 spatial-grounding format — noticeably more accurate than asking it
+   to freehand pixel coordinates), either way producing a list of text
+   regions + the original Korean.
+4. That Korean text is translated by the selected **engine** — Gemini
+   itself, Azure, Papago, or a local Argos Translate model.
 5. The backend samples each region's border pixels with Pillow to
    approximate the bubble's background color (used for reference; the
    on-page label defaults to solid white, adjustable).

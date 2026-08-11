@@ -8,6 +8,7 @@
   let panelEls = null;
   let glossary = [];
   let engine = "gemini";
+  let detector = "paddleocr";
 
   function sendMessage(message) {
     return new Promise((resolve) => {
@@ -227,6 +228,7 @@
       glossary,
       force,
       engine,
+      detector,
     });
 
     if (!response || !response.ok) {
@@ -247,16 +249,268 @@
       return;
     }
 
-    response.data.results.forEach((result, i) => {
+    for (let i = 0; i < response.data.results.length; i++) {
+      const result = response.data.results[i];
       const img = imgs[i];
       const label = img.id || img.src.slice(-12);
       if (!result) {
         logStatus(`${label}: failed`, true);
-        return;
+        continue;
       }
       renderOverlay(img, result);
       logStatus(`${label}: ${result.boxes.length} box(es)`);
+      // Sequenced (not fire-and-forget): the next image's boundary check
+      // needs this image's edge state already updated before it runs.
+      await maybeStitchWithPrevious(img, result);
+    }
+  }
+
+  function applyBoxUpdate(boxId, korean, english) {
+    const entry = registry.get(boxId);
+    if (!entry) return;
+    entry.korean = korean;
+    entry.english = english;
+    const koreanEl = entry.rowEl.querySelector(".ct-trow-korean");
+    if (koreanEl) koreanEl.textContent = korean;
+    const englishEl = entry.rowEl.querySelector(".ct-trow-english");
+    if (englishEl) englishEl.textContent = english;
+    entry.labelEl.textContent = english;
+    fitLabel(entry.boxEl, entry.labelEl);
+  }
+
+  // --- Cross-image boundary stitching --------------------------------------
+  //
+  // Naver slices a tall episode into fixed-height image files with no
+  // regard for where a speech bubble happens to fall, so a bubble's text
+  // can be split across the boundary between two adjacent images — each
+  // image gets detected/translated independently, so a split bubble comes
+  // back as two disconnected fragments (confirmed directly: "저기술은 대체
+  // 어떻게" on one image, "작동하는 거지." on the next, translated as two
+  // unrelated sentences instead of one). Since panels render in strict
+  // reading order, this catches it after the fact: if one image's
+  // bottom-most text sits right at its edge and the next image's top-most
+  // text sits right at *its* edge with matching horizontal position,
+  // they're almost certainly one sentence — merge and retranslate as a
+  // whole, then update both already-rendered boxes with the same result.
+
+  const EDGE_MARGIN = 0.06; // within the first/last 6% of the image's height
+  let prevImageBottomEdge = null; // { boxId, korean, x, w } | null
+
+  async function maybeStitchWithPrevious(img, data) {
+    if (!data.boxes.length) {
+      prevImageBottomEdge = null;
+      return;
+    }
+
+    let topIdx = 0;
+    let bottomIdx = 0;
+    data.boxes.forEach((b, i) => {
+      if (b.y < data.boxes[topIdx].y) topIdx = i;
+      if (b.y + b.h > data.boxes[bottomIdx].y + data.boxes[bottomIdx].h) bottomIdx = i;
     });
+    const top = data.boxes[topIdx];
+    const bottom = data.boxes[bottomIdx];
+    const topBoxId = `${img.id}__b${topIdx}`;
+    const bottomBoxId = `${img.id}__b${bottomIdx}`;
+
+    const topIsNearEdge = top.y < data.height * EDGE_MARGIN;
+    const bottomIsNearEdge = bottom.y + bottom.h > data.height * (1 - EDGE_MARGIN);
+
+    if (prevImageBottomEdge && topIsNearEdge) {
+      const xOverlap =
+        Math.min(prevImageBottomEdge.x + prevImageBottomEdge.w, top.x + top.w) -
+        Math.max(prevImageBottomEdge.x, top.x);
+      const narrower = Math.min(prevImageBottomEdge.w, top.w);
+
+      if (narrower > 0 && xOverlap > 0.3 * narrower) {
+        const mergedKorean = `${prevImageBottomEdge.korean} ${top.korean}`;
+        const response = await sendMessage({ type: "retranslate", korean: mergedKorean, glossary, engine });
+        if (response && response.ok) {
+          applyBoxUpdate(prevImageBottomEdge.boxId, mergedKorean, response.data.english);
+          applyBoxUpdate(topBoxId, mergedKorean, response.data.english);
+          logStatus(`Stitched dialogue split across ${img.id}'s boundary.`);
+        }
+      }
+    }
+
+    prevImageBottomEdge = bottomIsNearEdge
+      ? { boxId: bottomBoxId, korean: bottom.korean, x: bottom.x, w: bottom.w }
+      : null;
+  }
+
+  // --- Manual region selection ----------------------------------------------
+  //
+  // For gaps automated detection misses entirely (e.g. a line split mid-row
+  // across an image boundary — not caught by the boundary stitch above,
+  // since that needs both fragments to already be valid detections; here
+  // neither one is). Drag a selection over the page; the backend crops the
+  // overlapping image(s) server-side — client-side canvas cropping is
+  // blocked, since Naver's CDN sends no CORS headers — and treats the whole
+  // selection as one translation unit, however many images it spans.
+
+  let selecting = false;
+  let selectStart = null; // {x, y} in viewport coordinates
+  let selectBoxEl = null; // the live drag-rectangle shown while dragging
+  let manualBoxCounter = 0;
+
+  function startSelectMode() {
+    selecting = true;
+    document.body.classList.add("ct-selecting");
+    panelEls.selectBtn.textContent = "Cancel Selection (Esc)";
+    panelEls.selectBtn.classList.add("ct-active-toggle");
+    logStatus("Drag over the page to select an area to translate.");
+  }
+
+  function stopSelectMode() {
+    selecting = false;
+    document.body.classList.remove("ct-selecting");
+    panelEls.selectBtn.textContent = "Select Area to Translate";
+    panelEls.selectBtn.classList.remove("ct-active-toggle");
+    if (selectBoxEl) {
+      selectBoxEl.remove();
+      selectBoxEl = null;
+    }
+    selectStart = null;
+  }
+
+  function updateSelectBox(x, y) {
+    if (!selectBoxEl || !selectStart) return;
+    selectBoxEl.style.left = Math.min(selectStart.x, x) + "px";
+    selectBoxEl.style.top = Math.min(selectStart.y, y) + "px";
+    selectBoxEl.style.width = Math.abs(x - selectStart.x) + "px";
+    selectBoxEl.style.height = Math.abs(y - selectStart.y) + "px";
+  }
+
+  function onSelectMouseDown(e) {
+    if (!selecting || e.target.closest(".ct-panel")) return;
+    e.preventDefault();
+    selectStart = { x: e.clientX, y: e.clientY };
+    selectBoxEl = document.createElement("div");
+    selectBoxEl.className = "ct-select-box";
+    document.body.appendChild(selectBoxEl);
+    updateSelectBox(e.clientX, e.clientY);
+  }
+
+  function onSelectMouseMove(e) {
+    if (!selecting || !selectStart) return;
+    updateSelectBox(e.clientX, e.clientY);
+  }
+
+  async function onSelectMouseUp(e) {
+    if (!selecting || !selectStart) return;
+    const rect = {
+      left: Math.min(selectStart.x, e.clientX),
+      top: Math.min(selectStart.y, e.clientY),
+      right: Math.max(selectStart.x, e.clientX),
+      bottom: Math.max(selectStart.y, e.clientY),
+    };
+    stopSelectMode();
+
+    if (rect.right - rect.left < 8 || rect.bottom - rect.top < 8) {
+      return; // an accidental click, not a real drag
+    }
+    await translateSelection(rect);
+  }
+
+  document.addEventListener("mousedown", onSelectMouseDown, true);
+  document.addEventListener("mousemove", onSelectMouseMove, true);
+  document.addEventListener("mouseup", onSelectMouseUp, true);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && selecting) stopSelectMode();
+  });
+
+  async function translateSelection(viewportRect) {
+    // Page (document) coordinates, not viewer-relative ones: captured now,
+    // before the network round-trip below, so the rendered box still lands
+    // exactly where the user dragged even if the page scrolls while we wait.
+    // #sectionContWide (VIEWER_SELECTOR) isn't itself a CSS positioning
+    // context, so a position:absolute box appended inside it and positioned
+    // with viewer-relative left/top escapes past it to the document root —
+    // that's what put the box up near the top of the page instead of at the
+    // drag location. Document coordinates + appending to document.body sidestep
+    // that: they're correct regardless of what #sectionContWide's own
+    // position is, and scroll-invariant the same way the old approach intended.
+    const renderRect = {
+      left: viewportRect.left + window.scrollX,
+      top: viewportRect.top + window.scrollY,
+      width: viewportRect.right - viewportRect.left,
+      height: viewportRect.bottom - viewportRect.top,
+    };
+
+    const images = Array.from(document.querySelectorAll(IMAGE_SELECTOR));
+    const crops = [];
+    for (const img of images) {
+      const r = img.getBoundingClientRect();
+      const overlapLeft = Math.max(viewportRect.left, r.left);
+      const overlapTop = Math.max(viewportRect.top, r.top);
+      const overlapRight = Math.min(viewportRect.right, r.right);
+      const overlapBottom = Math.min(viewportRect.bottom, r.bottom);
+      if (overlapRight <= overlapLeft || overlapBottom <= overlapTop) continue;
+
+      const scaleX = img.naturalWidth / r.width;
+      const scaleY = img.naturalHeight / r.height;
+      crops.push({
+        image_url: img.src,
+        x: Math.round((overlapLeft - r.left) * scaleX),
+        y: Math.round((overlapTop - r.top) * scaleY),
+        w: Math.round((overlapRight - overlapLeft) * scaleX),
+        h: Math.round((overlapBottom - overlapTop) * scaleY),
+      });
+    }
+
+    if (crops.length === 0) {
+      logStatus("Selection didn't overlap any panel image.", true);
+      return;
+    }
+
+    logStatus(`Translating selected area (${crops.length} panel${crops.length > 1 ? "s" : ""})…`);
+    const response = await sendMessage({ type: "translateRegion", crops, glossary, engine, detector });
+
+    if (!response || !response.ok) {
+      logStatus(`Selection translate failed (${response ? response.status : "no response"})`, true);
+      return;
+    }
+
+    const { korean, english } = response.data;
+    if (!korean) {
+      logStatus("No text found in that selection.", true);
+      return;
+    }
+
+    renderManualBox(renderRect, korean, english);
+    logStatus(`Selection translated: "${english}"`);
+  }
+
+  function renderManualBox(renderRect, korean, english) {
+    const boxId = `manual__${manualBoxCounter++}`;
+
+    const hit = document.createElement("div");
+    hit.className = "ct-bubble ct-manual-bubble";
+    hit.style.position = "absolute";
+    hit.style.left = renderRect.left + "px";
+    hit.style.top = renderRect.top + "px";
+    hit.style.width = renderRect.width + "px";
+    hit.style.height = renderRect.height + "px";
+
+    const label = document.createElement("div");
+    label.className = "ct-bubble-label";
+    label.textContent = english;
+    hit.appendChild(label);
+
+    hit.addEventListener("mouseenter", () => setActive(boxId, true));
+    hit.addEventListener("mouseleave", () => setActive(boxId, false));
+    hit.addEventListener("click", () => jumpToRow(boxId));
+
+    // Appended to body (not the per-image .ct-img-wrap the automated boxes
+    // use) since a selection can span multiple stacked panel images — body
+    // is the one ancestor guaranteed to cover the whole page regardless of
+    // how many images the drag crossed. renderRect is in document (not
+    // viewport) coordinates to match.
+    document.body.appendChild(hit);
+    fitLabel(hit, label);
+
+    const row = addTranslationRow(boxId, "Manual", korean, english, false);
+    registry.set(boxId, { boxEl: hit, rowEl: row, labelEl: label, korean, english, flashTimer: null });
   }
 
   // Re-translate just one bubble's already-detected Korean text, leaving
@@ -277,11 +531,7 @@
       return;
     }
 
-    entry.english = response.data.english;
-    const englishEl = entry.rowEl.querySelector(".ct-trow-english");
-    if (englishEl) englishEl.textContent = entry.english;
-    entry.labelEl.textContent = entry.english;
-    fitLabel(entry.boxEl, entry.labelEl);
+    applyBoxUpdate(boxId, entry.korean, response.data.english);
   }
 
   function updateProgress(done, total) {
@@ -296,19 +546,31 @@
       return;
     }
 
+    prevImageBottomEdge = null; // don't stitch against a previous run's leftover state
+
+    // PaddleOCR has no quota to conserve, so there's no reason to batch it —
+    // chunking at 1 gives a progress update after every single panel instead
+    // of every 5. Gemini keeps real batching since that's what divides its
+    // request-count cost.
+    const chunkSize = detector === "gemini" ? BATCH_SIZE : 1;
+
     panelEls.translateBtn.disabled = true;
     panelEls.status.innerHTML = "";
     panelEls.translationsList.innerHTML = "";
     registry.clear();
-    logStatus(`Found ${images.length} panels. Translating in batches of ${BATCH_SIZE}…`);
+    logStatus(
+      chunkSize > 1
+        ? `Found ${images.length} panels. Translating in batches of ${chunkSize}…`
+        : `Found ${images.length} panels. Translating…`
+    );
 
     const total = images.length;
     let done = 0;
     panelEls.progressWrap.style.display = "block";
     updateProgress(done, total);
 
-    for (let start = 0; start < images.length; start += BATCH_SIZE) {
-      const chunk = images.slice(start, start + BATCH_SIZE);
+    for (let start = 0; start < images.length; start += chunkSize) {
+      const chunk = images.slice(start, start + chunkSize);
       await translateBatch(chunk);
       done += chunk.length;
       updateProgress(done, total);
@@ -395,9 +657,13 @@
 
   // --- Translation engine ----------------------------------------------
 
+  const VALID_ENGINES = ["gemini", "azure", "deepl", "nllb"];
+
   function loadEngine() {
     chrome.storage.local.get(["ctEngine"], (result) => {
-      engine = result.ctEngine || "gemini";
+      // Falls back to "gemini" for a stored value from a since-removed
+      // engine (e.g. the old Papago/Argos options), not just a missing one.
+      engine = VALID_ENGINES.includes(result.ctEngine) ? result.ctEngine : "gemini";
       if (panelEls) panelEls.engineSelect.value = engine;
     });
   }
@@ -405,6 +671,25 @@
   function changeEngine(value) {
     engine = value;
     chrome.storage.local.set({ ctEngine: value });
+  }
+
+  // --- Detector (finding boxes + reading Korean) ------------------------
+  //
+  // Independent of Engine (which only handles English translation).
+  // PaddleOCR is free/local/no quota but only reliable on real dialogue —
+  // see the Detector dropdown's option text. Gemini remains available for
+  // full SFX coverage or when PaddleOCR's confidence filtering misses text.
+
+  function loadDetector() {
+    chrome.storage.local.get(["ctDetector"], (result) => {
+      detector = result.ctDetector || "paddleocr";
+      if (panelEls) panelEls.detectorSelect.value = detector;
+    });
+  }
+
+  function changeDetector(value) {
+    detector = value;
+    chrome.storage.local.set({ ctDetector: value });
   }
 
   // --- SFX visibility -----------------------------------------------------
@@ -586,6 +871,7 @@
       <h3><span class="ct-dot bad" id="ct-health-dot"></span>Webtoon Translator</h3>
       <button id="ct-translate-btn">Translate Episode</button>
       <button id="ct-toggle-btn" style="display:none">Hide Translation</button>
+      <button id="ct-select-btn" class="ct-secondary-btn">Select Area to Translate</button>
       <div class="ct-progress-wrap" id="ct-progress-wrap" style="display:none">
         <div class="ct-progress-bar"><div class="ct-progress-fill" id="ct-progress-fill"></div></div>
         <div class="ct-progress-text" id="ct-progress-text">0 / 0 panels</div>
@@ -614,12 +900,19 @@
         <input type="checkbox" id="ct-sfx-checkbox" />
       </div>
       <div class="ct-fontsize-row">
+        <span>Detector</span>
+        <select id="ct-detector-select">
+          <option value="paddleocr">PaddleOCR (free, dialogue only)</option>
+          <option value="gemini">Gemini (best, full SFX coverage)</option>
+        </select>
+      </div>
+      <div class="ct-fontsize-row">
         <span>Engine</span>
         <select id="ct-engine-select">
-          <option value="gemini">Gemini (best quality)</option>
-          <option value="azure">Azure (needs API key)</option>
-          <option value="papago">Papago (needs API key)</option>
-          <option value="argos">Argos (free, offline, lower quality)</option>
+          <option value="gemini">Gemini</option>
+          <option value="azure">Azure</option>
+          <option value="deepl">DeepL</option>
+          <option value="nllb">NLLB (free, offline)</option>
         </select>
       </div>
       <div class="ct-tabs">
@@ -646,6 +939,7 @@
 
     const translateBtn = panel.querySelector("#ct-translate-btn");
     const toggleBtn = panel.querySelector("#ct-toggle-btn");
+    const selectBtn = panel.querySelector("#ct-select-btn");
     const progressWrap = panel.querySelector("#ct-progress-wrap");
     const progressFill = panel.querySelector("#ct-progress-fill");
     const progressText = panel.querySelector("#ct-progress-text");
@@ -659,6 +953,7 @@
     const opacityRange = panel.querySelector("#ct-opacity-range");
     const opacityVal = panel.querySelector("#ct-opacity-val");
     const colorInput = panel.querySelector("#ct-color-input");
+    const detectorSelect = panel.querySelector("#ct-detector-select");
     const engineSelect = panel.querySelector("#ct-engine-select");
     const showLabelsCheckbox = panel.querySelector("#ct-always-show-checkbox");
     const sfxCheckbox = panel.querySelector("#ct-sfx-checkbox");
@@ -671,12 +966,20 @@
 
     translateBtn.addEventListener("click", translateEpisode);
     toggleBtn.addEventListener("click", toggleOverlays);
+    selectBtn.addEventListener("click", () => {
+      if (selecting) {
+        stopSelectMode();
+      } else {
+        startSelectMode();
+      }
+    });
     panel.querySelector("#ct-gloss-add").addEventListener("click", addGlossaryEntry);
     panel.querySelector("#ct-font-dec").addEventListener("click", () => changeFontSize(-1));
     panel.querySelector("#ct-font-inc").addEventListener("click", () => changeFontSize(1));
     opacityRange.addEventListener("input", () => changeOpacity(Number(opacityRange.value)));
     colorInput.addEventListener("input", () => changeLabelColor(colorInput.value));
     engineSelect.addEventListener("change", () => changeEngine(engineSelect.value));
+    detectorSelect.addEventListener("change", () => changeDetector(detectorSelect.value));
     showLabelsCheckbox.addEventListener("change", () => changeAlwaysShowLabels(showLabelsCheckbox.checked));
     sfxCheckbox.addEventListener("change", () => changeShowSfx(sfxCheckbox.checked));
     for (const btn of tabButtons) {
@@ -686,6 +989,7 @@
     panelEls = {
       translateBtn,
       toggleBtn,
+      selectBtn,
       progressWrap,
       progressFill,
       progressText,
@@ -699,6 +1003,7 @@
       opacityRange,
       opacityVal,
       colorInput,
+      detectorSelect,
       engineSelect,
       showLabelsCheckbox,
       sfxCheckbox,
@@ -710,6 +1015,7 @@
     loadFontSize();
     loadOpacity();
     loadLabelColor();
+    loadDetector();
     loadEngine();
     loadAlwaysShowLabels();
     loadShowSfx();

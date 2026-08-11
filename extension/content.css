@@ -38,6 +38,39 @@
   cursor: default;
 }
 
+.ct-secondary-btn {
+  background: #3a3a3a !important;
+}
+
+.ct-secondary-btn.ct-active-toggle {
+  background: #b23c3c !important;
+}
+
+/* Drag-to-select mode: crosshair cursor and no accidental text selection
+   while dragging over the page. */
+body.ct-selecting {
+  cursor: crosshair !important;
+  user-select: none !important;
+}
+
+.ct-select-box {
+  position: fixed;
+  z-index: 999998;
+  border: 2px dashed #4a90e2;
+  background: rgba(74, 144, 226, 0.15);
+  pointer-events: none;
+}
+
+/* A manually-selected translation looks the same as an automated one but
+   with a distinct outline color, so it's clear at a glance which is which. */
+.ct-manual-bubble {
+  border-color: rgba(226, 160, 74, 0.8) !important;
+  /* Appended straight to <body> (not inside .ct-overlay-container, which
+     supplies z-index for the automated boxes), so it needs its own stacking
+     to stay above the page's own content. */
+  z-index: 500;
+}
+
 .ct-progress-wrap {
   margin-top: 8px;
 }
@@ -402,17 +435,17 @@
   border: 1.5px dashed rgba(120, 170, 255, 0.55);
 }
 
-/* The label is sized to its own text (not stretched to the hit area).
-   Visible by default; the "Always show translation" checkbox switches this
-   to hover/active-only via .ct-labels-hover-only below. */
+/* The label fills the entire detected region, so the translation fully
+   covers the original Korean instead of leaving it peeking out around a
+   smaller content-sized box. Visible by default; the "Always show
+   translation" checkbox switches this to hover/active-only via
+   .ct-labels-hover-only below. */
 .ct-bubble-label {
-  max-width: 92%;
-  max-height: 92%;
-  /* Flex items default to min-width/min-height:auto, which can size them
-     to their content and push past max-height before overflow ever clips
-     anything. Zero these out so max-height is the real ceiling. */
-  min-width: 0;
-  min-height: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 3px 7px;
   border-radius: 4px;
   font-weight: 600;
