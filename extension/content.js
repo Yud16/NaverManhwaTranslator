@@ -33,6 +33,19 @@
     }
   }
 
+  // Removes a single box (its overlay element + Translations-list row),
+  // unlike clearOverlay which drops every box belonging to one whole image.
+  // Used when a box's content is being replaced by a differently-shaped
+  // box elsewhere (e.g. two boundary-stitched fragments folded into one).
+  function removeBox(boxId) {
+    const entry = registry.get(boxId);
+    if (!entry) return;
+    clearTimeout(entry.flashTimer);
+    entry.boxEl.remove();
+    entry.rowEl.remove();
+    registry.delete(boxId);
+  }
+
   // Wrap the image in its own positioning context so the overlay tracks
   // the image's actual box even if panels above it are still loading and
   // shifting the page's layout. Percentage-based box coordinates then need
@@ -291,10 +304,38 @@
   // bottom-most text sits right at its edge and the next image's top-most
   // text sits right at *its* edge with matching horizontal position,
   // they're almost certainly one sentence — merge and retranslate as a
-  // whole, then update both already-rendered boxes with the same result.
+  // whole, then replace both fragments' boxes with a single box spanning
+  // both (not update both in place with the same text — that left two
+  // differently-sized boxes both showing the identical full sentence,
+  // which read as a duplicate/rendering bug rather than one merged bubble).
 
   const EDGE_MARGIN = 0.06; // within the first/last 6% of the image's height
-  let prevImageBottomEdge = null; // { boxId, korean, x, w } | null
+  let prevImageBottomEdge = null; // { boxId, korean, img, data, box } | null
+
+  // Converts a box's fractional (percentage-based) image coordinates into a
+  // page (document) rect — the same coordinate space renderPageBox expects —
+  // using the image's current on-screen position and size.
+  function boxToPageRect(img, data, box) {
+    const r = img.getBoundingClientRect();
+    const left = r.left + (box.x / data.width) * r.width;
+    const top = r.top + (box.y / data.height) * r.height;
+    const width = (box.w / data.width) * r.width;
+    const height = (box.h / data.height) * r.height;
+    return {
+      left: left + window.scrollX,
+      top: top + window.scrollY,
+      right: left + width + window.scrollX,
+      bottom: top + height + window.scrollY,
+    };
+  }
+
+  function unionPageRect(a, b) {
+    const left = Math.min(a.left, b.left);
+    const top = Math.min(a.top, b.top);
+    const right = Math.max(a.right, b.right);
+    const bottom = Math.max(a.bottom, b.bottom);
+    return { left, top, width: right - left, height: bottom - top };
+  }
 
   async function maybeStitchWithPrevious(img, data) {
     if (!data.boxes.length) {
@@ -318,23 +359,45 @@
 
     if (prevImageBottomEdge && topIsNearEdge) {
       const xOverlap =
-        Math.min(prevImageBottomEdge.x + prevImageBottomEdge.w, top.x + top.w) -
-        Math.max(prevImageBottomEdge.x, top.x);
-      const narrower = Math.min(prevImageBottomEdge.w, top.w);
+        Math.min(prevImageBottomEdge.box.x + prevImageBottomEdge.box.w, top.x + top.w) -
+        Math.max(prevImageBottomEdge.box.x, top.x);
+      const narrower = Math.min(prevImageBottomEdge.box.w, top.w);
 
       if (narrower > 0 && xOverlap > 0.3 * narrower) {
         const mergedKorean = `${prevImageBottomEdge.korean} ${top.korean}`;
+        // Captured now, before the network round-trip below, same reasoning
+        // as the manual-selection tool: if the page scrolls while we wait,
+        // the merged box should still land exactly on the two fragments'
+        // original spot, not drift with the scroll.
+        const unionRect = unionPageRect(
+          boxToPageRect(prevImageBottomEdge.img, prevImageBottomEdge.data, prevImageBottomEdge.box),
+          boxToPageRect(img, data, top)
+        );
         const response = await sendMessage({ type: "retranslate", korean: mergedKorean, glossary, engine });
         if (response && response.ok) {
-          applyBoxUpdate(prevImageBottomEdge.boxId, mergedKorean, response.data.english);
-          applyBoxUpdate(topBoxId, mergedKorean, response.data.english);
+          removeBox(prevImageBottomEdge.boxId);
+          removeBox(topBoxId);
+          renderPageBox(unionRect, mergedKorean, response.data.english, {
+            idPrefix: "stitch",
+            boxClassName: "ct-stitched-bubble",
+            panelLabel: "Stitched",
+          });
           logStatus(`Stitched dialogue split across ${img.id}'s boundary.`);
+
+          // The top fragment (now removed) was this image's only box, so
+          // there's no real "bottom edge" left in it to chain a further
+          // stitch against a third image onto — carrying its pre-merge text
+          // forward would silently drop the merge that just happened.
+          if (topBoxId === bottomBoxId) {
+            prevImageBottomEdge = null;
+            return;
+          }
         }
       }
     }
 
     prevImageBottomEdge = bottomIsNearEdge
-      ? { boxId: bottomBoxId, korean: bottom.korean, x: bottom.x, w: bottom.w }
+      ? { boxId: bottomBoxId, korean: bottom.korean, img, data, box: bottom }
       : null;
   }
 
@@ -351,7 +414,7 @@
   let selecting = false;
   let selectStart = null; // {x, y} in viewport coordinates
   let selectBoxEl = null; // the live drag-rectangle shown while dragging
-  let manualBoxCounter = 0;
+  let pageBoxCounter = 0;
 
   function startSelectMode() {
     selecting = true;
@@ -481,11 +544,17 @@
     logStatus(`Selection translated: "${english}"`);
   }
 
-  function renderManualBox(renderRect, korean, english) {
-    const boxId = `manual__${manualBoxCounter++}`;
+  // Renders one box positioned in page (document) coordinates, appended to
+  // <body> instead of a specific image's .ct-img-wrap — for boxes that don't
+  // belong to a single source image, either because the user drew an
+  // arbitrary selection (manual) or because it replaces two per-image
+  // fragments that got folded into one (stitched). renderRect is
+  // {left, top, width, height} in page coordinates.
+  function renderPageBox(renderRect, korean, english, { idPrefix, boxClassName, panelLabel }) {
+    const boxId = `${idPrefix}__${pageBoxCounter++}`;
 
     const hit = document.createElement("div");
-    hit.className = "ct-bubble ct-manual-bubble";
+    hit.className = `ct-bubble ${boxClassName}`;
     hit.style.position = "absolute";
     hit.style.left = renderRect.left + "px";
     hit.style.top = renderRect.top + "px";
@@ -501,16 +570,20 @@
     hit.addEventListener("mouseleave", () => setActive(boxId, false));
     hit.addEventListener("click", () => jumpToRow(boxId));
 
-    // Appended to body (not the per-image .ct-img-wrap the automated boxes
-    // use) since a selection can span multiple stacked panel images — body
-    // is the one ancestor guaranteed to cover the whole page regardless of
-    // how many images the drag crossed. renderRect is in document (not
-    // viewport) coordinates to match.
     document.body.appendChild(hit);
     fitLabel(hit, label);
 
-    const row = addTranslationRow(boxId, "Manual", korean, english, false);
+    const row = addTranslationRow(boxId, panelLabel, korean, english, false);
     registry.set(boxId, { boxEl: hit, rowEl: row, labelEl: label, korean, english, flashTimer: null });
+    return boxId;
+  }
+
+  function renderManualBox(renderRect, korean, english) {
+    renderPageBox(renderRect, korean, english, {
+      idPrefix: "manual",
+      boxClassName: "ct-manual-bubble",
+      panelLabel: "Manual",
+    });
   }
 
   // Re-translate just one bubble's already-detected Korean text, leaving
