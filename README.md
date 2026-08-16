@@ -102,20 +102,26 @@ curl http://127.0.0.1:8000/health
    without re-translating.
 6. Missed a line — e.g. one split across the boundary between two Naver image
    slices, worse than the automatic boundary-stitch below can catch? Click
-   **Select Area to Translate**, drag a box over it on the page, and it's
-   translated as its own floating overlay (works even across a boundary
-   between two adjacent images, via server-side compositing).
+   **Select Area to Translate** (or press **Alt+S** from anywhere on the
+   page), drag a box over it, and it's translated as its own floating
+   overlay (works even across a boundary between two adjacent images, via
+   server-side compositing). Alt+S again, or **Esc**, cancels an active
+   selection.
 
 ### Panel controls
 
-- **Text size / Bg opacity / Text color** — appearance of the on-page
-  labels, live-adjustable, persisted across sessions.
+- **Text size / Text color** — appearance of the on-page labels,
+  live-adjustable, persisted across sessions.
+- **Font** — Comic Neue (default), Bangers, and Permanent Marker are bundled
+  directly (OFL/Apache-2.0 licensed, see `extension/fonts/*.txt`) and render
+  identically for every reader with no local install. "Komika (if
+  installed)" is also listed — Komika Text/Axis is a commercial font not
+  included with the extension, so that option only does anything if you
+  separately own and have it installed on your own machine; otherwise it
+  falls back to Comic Neue.
 - **Always show translation** — on by default: labels render directly on the
   page. Turn it off to switch to invisible-until-hover instead (just a faint
   dashed outline at rest, full label on hover/click).
-- **Show sound effects** — off by default. SFX boxes are still detected and
-  translated either way; this only controls whether they're shown, and
-  toggling it is instant (no re-translate).
 - **Detector** — which method finds text regions + reads the Korean (see
   below).
 - **Engine** — which translator turns that Korean into English (see below).
@@ -182,7 +188,7 @@ This tool instead:
    itself, Azure, DeepL, or a local NLLB model.
 5. The backend samples each region's border pixels with Pillow to
    approximate the bubble's background color (used for reference; the
-   on-page label defaults to solid white, adjustable).
+   on-page label itself is always solid white).
 6. `content.js` wraps each image and, for each box, draws a label sized to
    its own text directly over the detected region (or an invisible
    dashed-outline hit area if "Always show translation" is off) — no pixel

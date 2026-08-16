@@ -75,7 +75,7 @@ Detection (finding text regions + reading the Korean) and translation (turning t
 - **A local LLM** (e.g. EXAONE via Ollama) — would likely work well, but needs the end user to install Ollama, download a multi-GB model, and own reasonably capable hardware — a bad fit for something meant to be usable by more than one technical person. Not integrated.
 - **PaddleOCR** (PP-OCRv5, Korean model) — tested directly against real panels rather than assumed. Results: 94.6% confidence exact match on real printed dialogue, but garbage or missed detections on stylized SFX lettering (confidence typically under 70%). **This is what's actually integrated, and is the default detector.**
 
-Because PaddleOCR's failure mode (low confidence on stylized/artistic text) correlates strongly with SFX specifically, `PADDLE_MIN_CONFIDENCE` (default 0.85) doubles as a de facto SFX filter — dropped results are simply not shown, rather than displaying a wrong translation. This isn't a real SFX classifier (unlike Gemini's own `is_sfx` field), just an empirically useful side effect.
+Because PaddleOCR's failure mode (low confidence on stylized/artistic text) correlates strongly with SFX specifically, `PADDLE_MIN_CONFIDENCE` (default 0.85) doubles as a de facto SFX filter — dropped results are simply not shown, rather than displaying a wrong translation. This isn't a real SFX classifier, just an empirically useful side effect.
 
 That filter isn't complete on its own, though: stylized SFX lettering sometimes gets misread as simple Latin digits/letters ("00", "6", "OK", "A") *confidently* enough to survive the confidence threshold. `_has_hangul()` catches this second failure mode directly — real Korean dialogue always contains at least one Hangul syllable character (`가-힣`), so any detection with none is dropped regardless of its confidence score. Confirmed against two panels that previously produced exactly this garbage: both now correctly return zero boxes instead of a nonsense "translation."
 
@@ -121,7 +121,7 @@ Each detected region gets two DOM elements:
 - **Always shown** (default): labels render directly on the page at all times.
 - **Hover-only** (`.ct-labels-hover-only` class on `<html>`): labels stay invisible (only the dashed hit-area outline shows) until hovered or clicked-active — the original behavior, still available for readers who'd rather not have translated text permanently overlaid on the art.
 
-Text size, background opacity, text color, and the hover-only toggle are all CSS custom properties / classes set on `document.documentElement`, so the panel's controls can change every currently-rendered label live with no re-render needed.
+Text size, text color, font, and the hover-only toggle are all CSS custom properties / classes set on `document.documentElement`, so the panel's controls can change every currently-rendered label live with no re-render needed.
 
 ## Per-box operations
 

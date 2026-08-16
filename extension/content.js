@@ -1,5 +1,4 @@
 (function () {
-  const VIEWER_SELECTOR = "#sectionContWide";
   const IMAGE_SELECTOR = '#sectionContWide img[id^="content_image_"]';
 
   const overlaysByImage = new Map(); // img -> {container, data}
@@ -96,10 +95,9 @@
     flash(boxId, entry.rowEl);
   }
 
-  function addTranslationRow(boxId, panelLabel, korean, english, isSfx) {
+  function addTranslationRow(boxId, panelLabel, korean, english) {
     const row = document.createElement("div");
     row.className = "ct-trow";
-    if (isSfx) row.classList.add("ct-sfx");
 
     const head = document.createElement("div");
     head.className = "ct-trow-head";
@@ -177,7 +175,6 @@
       // invisible other than a faint outline.
       const hit = document.createElement("div");
       hit.className = "ct-bubble";
-      if (box.sfx) hit.classList.add("ct-sfx");
       hit.style.left = (box.x / data.width) * 100 + "%";
       hit.style.top = (box.y / data.height) * 100 + "%";
       hit.style.width = (box.w / data.width) * 100 + "%";
@@ -185,8 +182,8 @@
 
       // Label: sized to its own text, not stretched to fill the hit area,
       // so short translations don't turn into oversized colored slabs.
-      // Background/text color and opacity are user-controlled (see the
-      // Text size / Bg opacity / Text color panel controls).
+      // Text/background color is user-controlled (see the Text size / Text
+      // color panel controls).
       const label = document.createElement("div");
       label.className = "ct-bubble-label";
       label.textContent = box.english;
@@ -199,7 +196,7 @@
       fitLabel(hit, label);
 
       const panelNum = (img.id.match(/\d+/) || ["?"])[0];
-      const row = addTranslationRow(boxId, `#${panelNum}`, box.korean, box.english, box.sfx);
+      const row = addTranslationRow(boxId, `#${panelNum}`, box.korean, box.english);
       registry.set(boxId, {
         boxEl: hit,
         rowEl: row,
@@ -427,7 +424,7 @@
   function stopSelectMode() {
     selecting = false;
     document.body.classList.remove("ct-selecting");
-    panelEls.selectBtn.textContent = "Select Area to Translate";
+    panelEls.selectBtn.textContent = "Select Area to Translate (Alt+S)";
     panelEls.selectBtn.classList.remove("ct-active-toggle");
     if (selectBoxEl) {
       selectBoxEl.remove();
@@ -479,7 +476,28 @@
   document.addEventListener("mousemove", onSelectMouseMove, true);
   document.addEventListener("mouseup", onSelectMouseUp, true);
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && selecting) stopSelectMode();
+    if (e.key === "Escape" && selecting) {
+      stopSelectMode();
+      return;
+    }
+
+    // Alt+S toggles select mode from anywhere on the page — a modifier
+    // combo specifically so it can't fire while typing a glossary term or
+    // anything else on the page (a bare "S" would).
+    if (e.altKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === "s") {
+      const target = e.target;
+      const isTyping =
+        target &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      if (isTyping) return;
+
+      e.preventDefault();
+      if (selecting) {
+        stopSelectMode();
+      } else {
+        startSelectMode();
+      }
+    }
   });
 
   async function translateSelection(viewportRect) {
@@ -573,7 +591,7 @@
     document.body.appendChild(hit);
     fitLabel(hit, label);
 
-    const row = addTranslationRow(boxId, panelLabel, korean, english, false);
+    const row = addTranslationRow(boxId, panelLabel, korean, english);
     registry.set(boxId, { boxEl: hit, rowEl: row, labelEl: label, korean, english, flashTimer: null });
     return boxId;
   }
@@ -769,33 +787,6 @@
     chrome.storage.local.set({ ctDetector: value });
   }
 
-  // --- SFX visibility -----------------------------------------------------
-  //
-  // Purely a display filter — SFX boxes are still detected and translated
-  // (Gemini has to look at the whole panel either way), this just hides
-  // them client-side so they don't clutter the page/list. Toggling it never
-  // needs a re-translate.
-
-  let showSfx = false;
-
-  function applyShowSfx() {
-    document.documentElement.classList.toggle("ct-hide-sfx", !showSfx);
-    if (panelEls) panelEls.sfxCheckbox.checked = showSfx;
-  }
-
-  function loadShowSfx() {
-    chrome.storage.local.get(["ctShowSfx"], (result) => {
-      showSfx = result.ctShowSfx ?? false;
-      applyShowSfx();
-    });
-  }
-
-  function changeShowSfx(value) {
-    showSfx = value;
-    chrome.storage.local.set({ ctShowSfx: value });
-    applyShowSfx();
-  }
-
   // --- Label visibility (always-shown vs. invisible-until-hover) ---------
 
   let alwaysShowLabels = true;
@@ -818,7 +809,7 @@
     applyAlwaysShowLabels();
   }
 
-  // --- Label appearance (size / background opacity / text color) -----------
+  // --- Label appearance (size / text color) ---------------------------------
 
   let labelFontSize = 24;
   const MIN_FONT_SIZE = 10;
@@ -849,24 +840,6 @@
     refitAllLabels();
   }
 
-  function applyOpacity(percent) {
-    document.documentElement.style.setProperty("--ct-label-bg-opacity", percent / 100);
-    if (panelEls) panelEls.opacityVal.textContent = percent + "%";
-  }
-
-  function loadOpacity() {
-    chrome.storage.local.get(["ctLabelOpacity"], (result) => {
-      const percent = result.ctLabelOpacity ?? 100;
-      if (panelEls) panelEls.opacityRange.value = percent;
-      applyOpacity(percent);
-    });
-  }
-
-  function changeOpacity(percent) {
-    chrome.storage.local.set({ ctLabelOpacity: percent });
-    applyOpacity(percent);
-  }
-
   function applyLabelColor(hex) {
     document.documentElement.style.setProperty("--ct-label-color", hex);
   }
@@ -882,6 +855,40 @@
   function changeLabelColor(hex) {
     chrome.storage.local.set({ ctLabelColor: hex });
     applyLabelColor(hex);
+  }
+
+  // Comic Neue/Bangers/Permanent Marker are bundled (extension/fonts/,
+  // OFL/Apache-2.0 licensed — see the .txt files there) so they render
+  // identically for every reader with no local install. Komika is not
+  // bundled — its commercial license doesn't permit redistributing the font
+  // file — so that option only works if the reader already has it
+  // installed locally; otherwise it silently falls through to Comic Neue.
+  const LABEL_FONT_STACKS = {
+    comicneue: '"Comic Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    bangers: '"Bangers", "Comic Sans MS", cursive',
+    marker: '"Permanent Marker", "Comic Sans MS", cursive',
+    komika: '"Komika Text", "Komika Axis", "Comic Neue", "Comic Sans MS", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    system: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+  };
+  const DEFAULT_LABEL_FONT = "comicneue";
+
+  function applyLabelFont(fontKey) {
+    const stack = LABEL_FONT_STACKS[fontKey] || LABEL_FONT_STACKS[DEFAULT_LABEL_FONT];
+    document.documentElement.style.setProperty("--ct-label-font-family", stack);
+  }
+
+  function loadLabelFont() {
+    chrome.storage.local.get(["ctLabelFont"], (result) => {
+      const fontKey = result.ctLabelFont && LABEL_FONT_STACKS[result.ctLabelFont] ? result.ctLabelFont : DEFAULT_LABEL_FONT;
+      if (panelEls) panelEls.fontFamilySelect.value = fontKey;
+      applyLabelFont(fontKey);
+    });
+  }
+
+  function changeLabelFont(fontKey) {
+    chrome.storage.local.set({ ctLabelFont: fontKey });
+    applyLabelFont(fontKey);
+    refitAllLabels();
   }
 
   // --- Copy menu (right-click a Translations row) --------------------------
@@ -941,6 +948,78 @@
     }
   }
 
+  // --- Panel dragging -------------------------------------------------------
+  //
+  // The panel starts fixed at top-right, which can sit over art/dialogue on
+  // some episodes. Dragging it by its title bar repositions it anywhere on
+  // screen; the position is remembered (per-machine, via chrome.storage.local)
+  // so it doesn't reset back to the corner on the next page load.
+
+  let panelDragOffset = null; // {x, y} from the panel's top-left to the cursor
+
+  function clampPanelPosition(panel, left, top) {
+    const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
+    const maxTop = Math.max(0, window.innerHeight - panel.offsetHeight);
+    return {
+      left: Math.min(Math.max(0, left), maxLeft),
+      top: Math.min(Math.max(0, top), maxTop),
+    };
+  }
+
+  function applyPanelPosition(panel, left, top) {
+    const clamped = clampPanelPosition(panel, left, top);
+    panel.style.left = clamped.left + "px";
+    panel.style.top = clamped.top + "px";
+    panel.style.right = "auto";
+  }
+
+  function loadPanelPosition(panel) {
+    chrome.storage.local.get(["ctPanelPos"], (result) => {
+      const pos = result.ctPanelPos;
+      if (pos && typeof pos.left === "number" && typeof pos.top === "number") {
+        applyPanelPosition(panel, pos.left, pos.top);
+      }
+    });
+  }
+
+  function enablePanelDrag(panel) {
+    const titleBar = panel.querySelector("h3");
+    titleBar.style.cursor = "move";
+
+    titleBar.addEventListener("mousedown", (e) => {
+      // Only the bare title bar drags the panel — nothing inside it is
+      // clickable anyway, but this stays correct if that ever changes.
+      if (e.target.closest("button, input, select, a")) return;
+      e.preventDefault();
+      const rect = panel.getBoundingClientRect();
+      panelDragOffset = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      document.body.style.userSelect = "none";
+    });
+
+    document.addEventListener("mousemove", (e) => {
+      if (!panelDragOffset) return;
+      applyPanelPosition(panel, e.clientX - panelDragOffset.x, e.clientY - panelDragOffset.y);
+    });
+
+    document.addEventListener("mouseup", () => {
+      if (!panelDragOffset) return;
+      panelDragOffset = null;
+      document.body.style.userSelect = "";
+      chrome.storage.local.set({
+        ctPanelPos: { left: parseInt(panel.style.left, 10), top: parseInt(panel.style.top, 10) },
+      });
+    });
+
+    // If a previously-saved position is now off-screen (e.g. the window
+    // shrank since it was saved), snap back into bounds on next load rather
+    // than leaving the panel unreachable.
+    window.addEventListener("resize", () => {
+      if (panel.style.left && panel.style.left !== "auto") {
+        applyPanelPosition(panel, parseInt(panel.style.left, 10), parseInt(panel.style.top, 10));
+      }
+    });
+  }
+
   function buildPanel() {
     const panel = document.createElement("div");
     panel.className = "ct-panel";
@@ -948,7 +1027,7 @@
       <h3><span class="ct-dot bad" id="ct-health-dot"></span>Webtoon Translator</h3>
       <button id="ct-translate-btn">Translate Episode</button>
       <button id="ct-toggle-btn" style="display:none">Hide Translation</button>
-      <button id="ct-select-btn" class="ct-secondary-btn">Select Area to Translate</button>
+      <button id="ct-select-btn" class="ct-secondary-btn">Select Area to Translate (Alt+S)</button>
       <div class="ct-progress-wrap" id="ct-progress-wrap" style="display:none">
         <div class="ct-progress-bar"><div class="ct-progress-fill" id="ct-progress-fill"></div></div>
         <div class="ct-progress-text" id="ct-progress-text">0 / 0 panels</div>
@@ -960,21 +1039,22 @@
         <button id="ct-font-inc">+</button>
       </div>
       <div class="ct-fontsize-row">
-        <span>Bg opacity</span>
-        <input type="range" id="ct-opacity-range" min="0" max="100" value="100" />
-        <span id="ct-opacity-val">100%</span>
-      </div>
-      <div class="ct-fontsize-row">
         <span>Text color</span>
         <input type="color" id="ct-color-input" value="#111111" />
       </div>
       <div class="ct-fontsize-row">
-        <span>Always show translation</span>
-        <input type="checkbox" id="ct-always-show-checkbox" />
+        <span>Font</span>
+        <select id="ct-font-family-select">
+          <option value="comicneue">Comic Neue</option>
+          <option value="bangers">Bangers</option>
+          <option value="marker">Permanent Marker</option>
+          <option value="komika">Komika (if installed)</option>
+          <option value="system">System Default</option>
+        </select>
       </div>
       <div class="ct-fontsize-row">
-        <span>Show sound effects</span>
-        <input type="checkbox" id="ct-sfx-checkbox" />
+        <span>Always show translation</span>
+        <input type="checkbox" id="ct-always-show-checkbox" />
       </div>
       <div class="ct-fontsize-row">
         <span>Detector</span>
@@ -1027,13 +1107,11 @@
     const glossaryKr = panel.querySelector("#ct-gloss-kr");
     const glossaryEn = panel.querySelector("#ct-gloss-en");
     const fontVal = panel.querySelector("#ct-font-val");
-    const opacityRange = panel.querySelector("#ct-opacity-range");
-    const opacityVal = panel.querySelector("#ct-opacity-val");
     const colorInput = panel.querySelector("#ct-color-input");
+    const fontFamilySelect = panel.querySelector("#ct-font-family-select");
     const detectorSelect = panel.querySelector("#ct-detector-select");
     const engineSelect = panel.querySelector("#ct-engine-select");
     const showLabelsCheckbox = panel.querySelector("#ct-always-show-checkbox");
-    const sfxCheckbox = panel.querySelector("#ct-sfx-checkbox");
     const tabButtons = Array.from(panel.querySelectorAll(".ct-tab"));
     const tabContents = {
       log: panel.querySelector("#ct-tab-log"),
@@ -1053,12 +1131,11 @@
     panel.querySelector("#ct-gloss-add").addEventListener("click", addGlossaryEntry);
     panel.querySelector("#ct-font-dec").addEventListener("click", () => changeFontSize(-1));
     panel.querySelector("#ct-font-inc").addEventListener("click", () => changeFontSize(1));
-    opacityRange.addEventListener("input", () => changeOpacity(Number(opacityRange.value)));
     colorInput.addEventListener("input", () => changeLabelColor(colorInput.value));
+    fontFamilySelect.addEventListener("change", () => changeLabelFont(fontFamilySelect.value));
     engineSelect.addEventListener("change", () => changeEngine(engineSelect.value));
     detectorSelect.addEventListener("change", () => changeDetector(detectorSelect.value));
     showLabelsCheckbox.addEventListener("change", () => changeAlwaysShowLabels(showLabelsCheckbox.checked));
-    sfxCheckbox.addEventListener("change", () => changeShowSfx(sfxCheckbox.checked));
     for (const btn of tabButtons) {
       btn.addEventListener("click", () => switchTab(btn.dataset.tab));
     }
@@ -1077,25 +1154,24 @@
       glossaryKr,
       glossaryEn,
       fontVal,
-      opacityRange,
-      opacityVal,
       colorInput,
+      fontFamilySelect,
       detectorSelect,
       engineSelect,
       showLabelsCheckbox,
-      sfxCheckbox,
       tabButtons,
       tabContents,
     };
 
+    enablePanelDrag(panel);
+    loadPanelPosition(panel);
     loadGlossary();
     loadFontSize();
-    loadOpacity();
     loadLabelColor();
+    loadLabelFont();
     loadDetector();
     loadEngine();
     loadAlwaysShowLabels();
-    loadShowSfx();
 
     sendMessage({ type: "health" }).then((response) => {
       if (response && response.ok) {
