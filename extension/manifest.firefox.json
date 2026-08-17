@@ -9,7 +9,7 @@
     "http://127.0.0.1:8000/*"
   ],
   "background": {
-    "service_worker": "background.js"
+    "scripts": ["background.js"]
   },
   "content_scripts": [
     {
@@ -24,5 +24,13 @@
       "resources": ["fonts/*"],
       "matches": ["https://comic.naver.com/*"]
     }
-  ]
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "naver-webtoon-translator@local",
+      "data_collection_permissions": {
+        "required": ["websiteContent"]
+      }
+    }
+  }
 }

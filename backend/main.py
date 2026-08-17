@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     # number. Higher = fewer calls, but a bigger blast radius if one call
     # fails, and more images for the model to keep straight at once.
     gemini_batch_size: int = 5
+    # How many detected text lines go into a single Gemini translation call
+    # (used when the detector isn't Gemini but the engine is — e.g. the
+    # PaddleOCR-detector + Gemini-engine combo). Text lines are far lighter
+    # than whole images, so this can safely be much larger than
+    # gemini_batch_size: confirmed the naive one-call-per-box approach cost
+    # 100+ throttled Gemini calls (10+ minutes of pure pacing) on a full
+    # episode; batching lines like this cuts that to a handful of calls.
+    gemini_text_batch_size: int = 30
     # Optional: only needed if the "azure" translation engine is selected.
     azure_translator_key: str = ""
     azure_translator_region: str = ""
@@ -68,7 +76,9 @@ app = FastAPI(title="Comic Translator Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^chrome-extension://.*",
+    # chrome-extension:// covers Chrome/Edge/other Chromium browsers;
+    # moz-extension:// is Firefox's equivalent extension origin scheme.
+    allow_origin_regex=r"^(chrome-extension|moz-extension)://.*",
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
@@ -93,7 +103,6 @@ class RawBox(BaseModel):
     xmax: int = Field(description="Right edge, 0-1000 (fraction of image width x1000)")
     korean: str = Field(description="The original Korean text in this region")
     english: str = Field(description="Natural English translation preserving tone")
-    is_sfx: bool = Field(description="True for sound-effect/onomatopoeia text drawn into the art, false for actual dialogue/narration meant to be read as language")
 
 
 class TranslationResult(BaseModel):
@@ -113,7 +122,6 @@ class TextBox(BaseModel):
     h: int
     korean: str
     english: str
-    is_sfx: bool
 
 
 def denormalize_box(box: RawBox, img_w: int, img_h: int) -> TextBox:
@@ -121,7 +129,7 @@ def denormalize_box(box: RawBox, img_w: int, img_h: int) -> TextBox:
     y = round(box.ymin / 1000 * img_h)
     w = round((box.xmax - box.xmin) / 1000 * img_w)
     h = round((box.ymax - box.ymin) / 1000 * img_h)
-    return TextBox(x=x, y=y, w=w, h=h, korean=box.korean, english=box.english, is_sfx=box.is_sfx)
+    return TextBox(x=x, y=y, w=w, h=h, korean=box.korean, english=box.english)
 
 
 class GlossaryEntry(BaseModel):
@@ -181,9 +189,6 @@ the art. For each region return:
 - the original Korean text
 - a natural, tone-preserving English translation (shouting stays shouting,
   casual speech stays casual)
-- is_sfx: true if this is a sound effect/onomatopoeia drawn into the art
-  (impact sounds, footsteps, ambient noise, etc.), false for anything meant
-  to be read as actual dialogue or narration
 
 Ignore watermarks, logos, page numbers, and UI chrome. If a panel has no
 text, its entry should have an empty boxes list. Do not merge separate
@@ -417,6 +422,68 @@ def call_gemini_text(settings: Settings, korean: str, glossary: list[GlossaryEnt
     return result.english
 
 
+class TextBatchResult(BaseModel):
+    translations: list[str] = Field(
+        description="Exactly one English translation per input line, in the same order the lines were given"
+    )
+
+
+def build_text_batch_prompt(count: int) -> str:
+    return f"""Translate the following {count} lines of Korean webtoon (manhwa) dialogue into
+natural, tone-preserving English (shouting stays shouting, casual speech
+stays casual). Each line is independent — they're detected text from
+possibly different speech bubbles or even different panels, not one
+continuous conversation — so translate each on its own rather than
+inferring context from its neighbors.
+
+Return exactly {count} entries in the `translations` array, in the same
+order as the input lines — translations[0] for line 1, translations[1] for
+line 2, and so on. Every line gets an entry."""
+
+
+def call_gemini_text_batch(
+    settings: Settings, korean_texts: list[str], glossary: list[GlossaryEntry]
+) -> list[str]:
+    """Translates several independent lines of Korean text in one Gemini
+    call instead of one call per line. Used when the detector already found
+    the text (PaddleOCR or Gemini-as-OCR-only) but Gemini is doing the
+    translating — previously every detected box cost its own Gemini
+    round-trip, each paced at least gemini_min_interval_seconds apart, which
+    dominated total translate time far more than actual API latency did."""
+    numbered = "\n".join(f'{i}. "{text}"' for i, text in enumerate(korean_texts, start=1))
+    prompt = (
+        build_text_batch_prompt(len(korean_texts))
+        + build_glossary_instructions(glossary)
+        + f"\n\nLines:\n{numbered}"
+    )
+    result = _run_gemini(settings, [prompt], TextBatchResult)
+    if len(result.translations) != len(korean_texts):
+        logger.warning(
+            "Gemini text batch returned %d results for %d lines — padding/truncating to match",
+            len(result.translations),
+            len(korean_texts),
+        )
+        translations = result.translations[: len(korean_texts)]
+        while len(translations) < len(korean_texts):
+            translations.append("")
+        return translations
+    return result.translations
+
+
+def call_gemini_text_batch_chunked(
+    settings: Settings, korean_texts: list[str], glossary: list[GlossaryEntry]
+) -> list[str]:
+    """Splits into settings.gemini_text_batch_size-sized calls to
+    call_gemini_text_batch. Callers may hand this every line from a whole
+    episode at once; this is what actually enforces the configured chunk
+    size rather than trusting each caller to chunk correctly."""
+    translations: list[str] = []
+    size = max(1, settings.gemini_text_batch_size)
+    for start in range(0, len(korean_texts), size):
+        translations.extend(call_gemini_text_batch(settings, korean_texts[start : start + size], glossary))
+    return translations
+
+
 @app.get("/health")
 def health():
     settings = get_settings()
@@ -605,7 +672,6 @@ def paddleocr_detect(settings: Settings, image_bytes: bytes, img_w: int, img_h: 
                 xmax=round(x2 / img_w * 1000),
                 korean=text,
                 english="",  # PaddleOCR only detects/reads — never translates
-                is_sfx=False,  # not classified; low-confidence SFX is filtered above instead
             )
         )
     return TranslationResult(boxes=boxes)
@@ -916,33 +982,52 @@ def clamp_box(box: TextBox, img_w: int, img_h: int) -> TextBox | None:
         h=h,
         korean=clean_text(box.korean),
         english=clean_text(box.english),
-        is_sfx=box.is_sfx,
     )
+
+
+def clamp_boxes(img: Image.Image, result: TranslationResult) -> list[TextBox]:
+    """Denormalizes + clamps every raw detection for one image, dropping any
+    that end up with no visible area. Split out from build_payload so a
+    caller translating in a cross-image batch (see
+    call_gemini_text_batch_chunked) can collect every image's boxes before
+    translating any of them, instead of one image — and one box — at a
+    time."""
+    boxes = []
+    for raw_box in result.boxes:
+        box = clamp_box(denormalize_box(raw_box, img.width, img.height), img.width, img.height)
+        if box is not None:
+            boxes.append(box)
+    return boxes
 
 
 def build_payload(
     img: Image.Image,
-    result: TranslationResult,
+    boxes: list[TextBox],
     engine: str,
     glossary: list[GlossaryEntry],
     settings: Settings,
     detector: str,
+    gemini_translations: list[str] | None = None,
 ) -> dict:
-    """Turns one image's raw detection into the final API response shape:
-    clamps/cleans each box and translates it via the selected engine. When
+    """Turns one image's already-clamped boxes into the final API response
+    shape, translating each via the selected engine. When
     detector == engine == "gemini", the translation was already produced
     together with detection (glossary-aware, via the prompt) and `box.english`
-    is trusted as-is; every other combination — including engine=="gemini"
-    paired with a non-Gemini detector — translates each box explicitly,
-    since PaddleOCR only detects/reads and never translates."""
-    boxes = []
-    for raw_box in result.boxes:
-        box = clamp_box(denormalize_box(raw_box, img.width, img.height), img.width, img.height)
-        if box is None:
-            continue
-
+    is trusted as-is. When engine == "gemini" with a different detector,
+    gemini_translations (pre-computed via a batched call covering possibly
+    several images at once) is used if given, falling back to one Gemini
+    call per box otherwise. Every other engine still translates box-by-box —
+    those calls aren't throttled the way Gemini's are, so batching them
+    hasn't been worth the same complexity."""
+    out_boxes = []
+    for i, box in enumerate(boxes):
         if engine == "gemini":
-            english = box.english if detector == "gemini" else call_gemini_text(settings, box.korean, glossary)
+            if detector == "gemini":
+                english = box.english
+            elif gemini_translations is not None:
+                english = gemini_translations[i]
+            else:
+                english = call_gemini_text(settings, box.korean, glossary)
         elif engine == "azure":
             english = azure_translate_text(box.korean, glossary, settings)
         elif engine == "deepl":
@@ -950,7 +1035,7 @@ def build_payload(
         else:  # nllb
             english = translate_with_glossary(box.korean, glossary, nllb_translate_text)
 
-        boxes.append(
+        out_boxes.append(
             {
                 "x": box.x,
                 "y": box.y,
@@ -959,11 +1044,10 @@ def build_payload(
                 "korean": box.korean,
                 "english": clean_text(english),
                 "color": sample_border_color(img, box),
-                "sfx": box.is_sfx,
             }
         )
 
-    return {"width": img.width, "height": img.height, "boxes": boxes}
+    return {"width": img.width, "height": img.height, "boxes": out_boxes}
 
 
 def _validate_engine_detector(engine: str, detector: str) -> None:
@@ -995,7 +1079,8 @@ def translate(req: TranslateRequest):
 
     result = _detect(settings, req.detector, req.engine, req.image_url, image_bytes, img, req.glossary, req.force)
 
-    payload = build_payload(img, result, req.engine, req.glossary, settings, req.detector)
+    boxes = clamp_boxes(img, result)
+    payload = build_payload(img, boxes, req.engine, req.glossary, settings, req.detector)
     _cache[cache_key] = payload
     save_cache()
     return payload
@@ -1035,8 +1120,26 @@ def translate_batch(req: TranslateBatchRequest):
         else:
             results = get_ocr_boxes_batch(settings, pending_urls, images_bytes, req.force)
 
-        for idx, img, result in zip(pending_indices, imgs, results):
-            payload = build_payload(img, result, req.engine, req.glossary, settings, req.detector)
+        # Clamp every image's raw detections up front so translation below
+        # can be batched across the whole request instead of per-image.
+        per_image_boxes = [clamp_boxes(img, result) for img, result in zip(imgs, results)]
+
+        gemini_translations = None
+        if req.engine == "gemini" and req.detector != "gemini":
+            # One (or a few, chunked) Gemini call for every detected line in
+            # this whole request instead of one throttled call per box —
+            # see call_gemini_text_batch_chunked.
+            flat_korean = [box.korean for boxes in per_image_boxes for box in boxes]
+            if flat_korean:
+                gemini_translations = call_gemini_text_batch_chunked(settings, flat_korean, req.glossary)
+
+        offset = 0
+        for idx, img, boxes in zip(pending_indices, imgs, per_image_boxes):
+            image_translations = None
+            if gemini_translations is not None:
+                image_translations = gemini_translations[offset : offset + len(boxes)]
+                offset += len(boxes)
+            payload = build_payload(img, boxes, req.engine, req.glossary, settings, req.detector, image_translations)
             payloads[idx] = payload
             _cache[cache_keys[idx]] = payload
 

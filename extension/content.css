@@ -1,3 +1,36 @@
+/* Bundled comic-lettering fonts for translated labels — all genuinely
+   free/open (OFL or Apache 2.0, see extension/fonts/*.txt), self-hosted
+   from Google Fonts' official releases so they work for every reader with
+   no local install required. Selectable via the panel's Font dropdown. */
+@font-face {
+  font-family: "Bangers";
+  src: url("fonts/Bangers-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Comic Neue";
+  src: url("fonts/ComicNeue-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Comic Neue";
+  src: url("fonts/ComicNeue-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Permanent Marker";
+  src: url("fonts/PermanentMarker-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 .ct-panel {
   position: fixed;
   top: 90px;
@@ -18,6 +51,9 @@
   font-size: 14px;
   display: flex;
   align-items: center;
+  /* Doubles as the drag handle for repositioning the panel (see
+     enablePanelDrag in content.js) — no text to accidentally select. */
+  user-select: none;
 }
 
 .ct-panel button {
@@ -133,18 +169,6 @@ body.ct-selecting {
   font-size: 14px !important;
 }
 
-.ct-fontsize-row input[type="range"] {
-  flex: 1;
-  accent-color: #4a90e2;
-}
-
-.ct-fontsize-row #ct-opacity-val {
-  flex: none;
-  min-width: 34px;
-  text-align: center;
-  color: #fff;
-}
-
 .ct-fontsize-row select {
   flex: none;
   padding: 3px 4px;
@@ -173,14 +197,6 @@ body.ct-selecting {
   height: 16px;
   accent-color: #4a90e2;
   cursor: pointer;
-}
-
-/* SFX boxes/rows stay in the DOM (still detected + translated either way)
-   but are hidden client-side when the "Show sound effects" toggle is off —
-   toggling it is instant, no re-translate needed. */
-.ct-hide-sfx .ct-bubble.ct-sfx,
-.ct-hide-sfx .ct-trow.ct-sfx {
-  display: none;
 }
 
 .ct-tabs {
@@ -464,8 +480,12 @@ body.ct-selecting {
   overflow-wrap: break-word;
   overflow: hidden;
   pointer-events: none;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: rgba(255, 255, 255, var(--ct-label-bg-opacity, 1));
+  /* Set by the panel's Font dropdown (see --ct-label-font-family in
+     content.js) — defaults to the bundled Comic Neue, which unlike Komika
+     (commercial, not bundled — see the "Komika (if installed)" option)
+     renders identically for every reader with no local install needed. */
+  font-family: var(--ct-label-font-family, "Comic Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  background: #fff;
   color: var(--ct-label-color, #111111);
   opacity: 1;
   transition: opacity 0.12s ease;
