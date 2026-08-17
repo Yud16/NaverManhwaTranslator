@@ -76,7 +76,9 @@ app = FastAPI(title="Comic Translator Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^chrome-extension://.*",
+    # chrome-extension:// covers Chrome/Edge/other Chromium browsers;
+    # moz-extension:// is Firefox's equivalent extension origin scheme.
+    allow_origin_regex=r"^(chrome-extension|moz-extension)://.*",
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
