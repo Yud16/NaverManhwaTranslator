@@ -7,8 +7,9 @@ overlaid directly on the page as you read. Two parts:
   regions using whichever detector you've selected (PaddleOCR by default, or
   Gemini), and translates each line using whichever engine you've selected
   (Gemini by default, or Azure, DeepL, NLLB).
-- `extension/` — a Chrome extension (Manifest V3) that finds panel images on
-  the page and draws translated labels directly over them.
+- `extension/` — a Manifest V3 browser extension (Chrome and Firefox) that
+  finds panel images on the page and draws translated labels directly over
+  them.
 
 With the default detector (PaddleOCR), panel images never leave your machine
 for detection — only the selected translation engine (Gemini by default)
@@ -37,7 +38,8 @@ setup script will tell you if it isn't.
    small black window — leave it open in the background while you read;
    closing it turns translation off. (If it says the backend "isn't set up
    yet," run `setup.bat` first.)
-3. **Load the extension in Chrome** — one-time, see below.
+3. **Load the extension in Chrome** — one-time, see below (Firefox is also
+   supported, with a bit more setup — see [2b](#2b-load-the-extension-in-firefox-optional)).
 4. Open any episode on `comic.naver.com`, click **Translate Episode** in the
    panel that appears top-right, and read.
 
@@ -80,6 +82,53 @@ curl http://127.0.0.1:8000/health
 2. Enable **Developer mode** (top-right toggle)
 3. Click **Load unpacked**
 4. Select the `extension/` folder
+
+## 2b. Load the extension in Firefox (optional)
+
+Firefox needs its own manifest (`extension/manifest.firefox.json` — same
+extension, just a `background.scripts` key instead of Chrome's
+`background.service_worker`, which Firefox doesn't reliably support across
+versions) and, for a permanent install, a Mozilla-signed package. The
+backend's CORS is already configured to accept both `chrome-extension://`
+and `moz-extension://` origins, so no backend changes are needed either way.
+
+**Quick test (temporary — reloads on every Firefox restart):**
+
+1. Go to `about:debugging#/runtime/this-firefox`
+2. Click **Load Temporary Add-on**
+3. Select `extension/manifest.firefox.json` directly (Firefox lets you pick
+   a specific file here, unlike Chrome's folder-based "Load unpacked")
+
+**Permanent install (survives restarts, no reloading):**
+
+Firefox requires every extension to be signed by Mozilla to install
+permanently — this applies even to something only you will ever use, not
+just Add-ons distributed publicly. The free path that doesn't require
+public listing or review is self-distribution ("unlisted") signing:
+
+1. Build the package:
+   ```bash
+   backend/.venv/Scripts/python.exe extension/package_firefox.py
+   ```
+   This produces `extension/naver-webtoon-translator-firefox.zip`, with
+   `manifest.firefox.json` renamed to `manifest.json` inside it (AMO
+   requires that exact filename) alongside the shared JS/CSS/font files.
+2. Create a free account at [accounts.firefox.com](https://accounts.firefox.com),
+   then go to [addons.mozilla.org/developers/](https://addons.mozilla.org/developers/)
+   and click **Submit a New Add-on**.
+3. Choose **"On your own"** (self-distribution) — not "On this site," which
+   is the public-listing path with human review.
+4. Upload the zip. Automated validation (not human review) usually takes
+   seconds. If it passes, a signed `.xpi` becomes available for download
+   from that version's page in **Manage Status & Versions**.
+5. Install the signed `.xpi`: in Firefox, go to `about:addons` → gear icon
+   → **Install Add-on From File...** (or just drag the `.xpi` into a
+   Firefox window) → accept the install prompt.
+
+For any future update: bump `"version"` in **both** `manifest.json` and
+`manifest.firefox.json`, re-run the packaging script, upload the new zip as
+a new version, and install the newly-signed `.xpi` again — a sideloaded
+add-on like this doesn't auto-update the way a store install does.
 
 ## 3. Use it
 
